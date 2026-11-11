@@ -376,7 +376,6 @@ fun WoodScanApp() {
             activeRecording = null
             isRecording = false
             elapsedSec = 0
-            showSummaryModal = true
         } else {
             telemetryLog.clear()
             recordStartMs = System.currentTimeMillis()
@@ -396,7 +395,10 @@ fun WoodScanApp() {
                     if (event is VideoRecordEvent.Finalize) {
                         if (event.hasError()) {
                             file.delete()
+                            tempVideoFile = null
                             Toast.makeText(context, "Recording failed.", Toast.LENGTH_SHORT).show()
+                        } else {
+                            showSummaryModal = true
                         }
                     }
                 }
@@ -664,6 +666,7 @@ fun WoodScanApp() {
                                     mediaController.setAnchorView(this)
                                     setMediaController(mediaController)
                                     requestFocus()
+                                    setOnPreparedListener { it.isLooping = true }
                                     start() // Auto-play the video
                                 }
                             },
