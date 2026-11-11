@@ -9,6 +9,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.camera2.CaptureRequest
+import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
@@ -22,6 +23,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
@@ -164,6 +166,19 @@ fun WoodScanApp() {
         }
     }
 
+    // Android 9 e precedenti: permesso per scrivere in Movies/ e Download/ (richiesto dopo quello della camera)
+    val storagePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { }
+    LaunchedEffect(hasCameraPermission) {
+        if (hasCameraPermission && Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
+    }
+
     var roll by remember { mutableDoubleStateOf(0.0) }
     var pitch by remember { mutableDoubleStateOf(0.0) }
     var rotSpeed by remember { mutableDoubleStateOf(0.0) }
@@ -192,6 +207,7 @@ fun WoodScanApp() {
     // NEW: Temporary File Tracking
     var tempVideoFile by remember { mutableStateOf<File?>(null) }
     var currentVideoName by remember { mutableStateOf("") }
+    val logger = remember { CaptureLogger(context) }
 
     DisposableEffect(simMode) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -377,6 +393,7 @@ fun WoodScanApp() {
             isRecording = false
             elapsedSec = 0
         } else {
+            if (tempVideoFile != null) return   // la registrazione precedente non è ancora chiusa
             telemetryLog.clear()
             recordStartMs = System.currentTimeMillis()
 
@@ -385,6 +402,8 @@ fun WoodScanApp() {
             currentVideoName = "woodpile_scan_$timestamp.mp4"
             val file = File(context.cacheDir, currentVideoName)
             tempVideoFile = file
+            if (!logger.start(context.cacheDir, currentVideoName.removeSuffix(".mp4")))
+                Toast.makeText(context, "Orientation sensor not available: IMU not logged", Toast.LENGTH_LONG).show()
 
             val outputOptions = FileOutputOptions.Builder(file).build()
 
@@ -392,12 +411,15 @@ fun WoodScanApp() {
             activeRecording = videoCapture.output
                 .prepareRecording(context, outputOptions)
                 .start(ContextCompat.getMainExecutor(context)) { event ->
+                    if (event is VideoRecordEvent.Start) logger.onVideoStart()
                     if (event is VideoRecordEvent.Finalize) {
                         if (event.hasError()) {
                             file.delete()
+                            logger.deleteFiles()
                             tempVideoFile = null
                             Toast.makeText(context, "Recording failed.", Toast.LENGTH_SHORT).show()
                         } else {
+                            logger.stop(file)
                             showSummaryModal = true
                         }
                     }
@@ -429,9 +451,9 @@ fun WoodScanApp() {
 
                     cameraProviderFuture.addListener({
                         val cameraProvider = cameraProviderFuture.get()
-                        val preview = Preview.Builder().build().also {
-                            it.surfaceProvider = previewView.surfaceProvider
-                        }
+                        val preview = Preview.Builder()
+                            .also { Camera2Interop.Extender(it).setSessionCaptureCallback(logger.frameCallback) }
+                            .build().also { it.surfaceProvider = previewView.surfaceProvider }
 
                         val imageAnalysis = ImageAnalysis.Builder()
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -526,6 +548,7 @@ fun WoodScanApp() {
                                 imageAnalysis,
                                 videoCapture
                             )
+                            logger.onCameraBound(cameraRef!!)
                         } catch (e: Exception) {
                             e.printStackTrace()
                         }
@@ -692,27 +715,15 @@ fun WoodScanApp() {
                         Button(
                             onClick = {
                                 tempVideoFile?.let { file ->
-                                    val values = ContentValues().apply {
-                                        put(MediaStore.MediaColumns.DISPLAY_NAME, currentVideoName)
-                                        put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/WoodScanPro")
-                                        }
-                                    }
-                                    val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
-                                    uri?.let { destUri ->
-                                        context.contentResolver.openOutputStream(destUri)?.use { outStream ->
-                                            file.inputStream().use { inStream ->
-                                                inStream.copyTo(outStream)
-                                            }
-                                        }
-                                        Toast.makeText(context, "Saved to Gallery & JSON Exported", Toast.LENGTH_SHORT).show()
-                                    }
+                                    exportVideo(context, file, currentVideoName)
+                                    Toast.makeText(context, "Saved to Gallery & JSON Exported", Toast.LENGTH_SHORT).show()
 
                                     // Export JSON matching the video name
                                     val jsonName = currentVideoName.replace(".mp4", ".json")
                                     exportTelemetryJson(context, telemetryLog, jsonName)
 
+                                    logger.files.forEach { exportFile(context, it) }
+                                    logger.deleteFiles()
                                     // Clean up temporary file
                                     file.delete()
                                     tempVideoFile = null
@@ -729,6 +740,7 @@ fun WoodScanApp() {
                         Button(
                             onClick = {
                                 tempVideoFile?.delete() // Instantly delete the cache file
+                                logger.deleteFiles()
                                 tempVideoFile = null
                                 showSummaryModal = false
                             },
@@ -794,10 +806,45 @@ fun exportTelemetryJson(context: Context, samples: List<TelemetrySample>, fileNa
                 }
             }
         } else {
-            val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "WoodScanPro").apply { mkdirs() }
             File(dir, fileName).writeText(root.toString(2))
         }
     } catch (e: Exception) {
         Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** Salva il video in Movies/WoodScanPro (visibile anche nella Galleria). */
+fun exportVideo(context: Context, file: File, name: String) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/WoodScanPro")
+        }
+        val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return
+        context.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+    } else {
+        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "WoodScanPro").apply { mkdirs() }
+        val dest = File(dir, name)
+        file.copyTo(dest, overwrite = true)
+        MediaScannerConnection.scanFile(context, arrayOf(dest.absolutePath), arrayOf("video/mp4"), null)
+    }
+}
+
+/** Salva un file del logger in Download/WoodScanPro. */
+fun exportFile(context: Context, file: File) {
+    val mime = if (file.extension == "csv") "text/csv" else "application/json"
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, file.name)
+            put(MediaStore.Downloads.MIME_TYPE, mime)
+            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/WoodScanPro")
+        }
+        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
+        context.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
+    } else {
+        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "WoodScanPro").apply { mkdirs() }
+        file.copyTo(File(dir, file.name), overwrite = true)
     }
 }
