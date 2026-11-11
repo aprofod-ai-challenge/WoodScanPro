@@ -575,12 +575,16 @@ fun WoodScanApp() {
 
             Box(modifier = Modifier.fillMaxWidth().weight(1f).padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
-                    val dashEffect = PathEffect.dashPathEffect(floatArrayOf(20f, 14f), 0f)
+                    val dashEffect = PathEffect.dashPathEffect(floatArrayOf(14.dp.toPx(), 8.dp.toPx()), 0f)
                     val topY = size.height * 0.10f
                     val botY = size.height * 0.90f
-                    drawLine(color = Color.White.copy(alpha = 0.55f), start = Offset(0f, topY), end = Offset(size.width, topY), strokeWidth = 4f, pathEffect = dashEffect)
-                    drawLine(color = Color.White.copy(alpha = 0.55f), start = Offset(0f, botY), end = Offset(size.width, botY), strokeWidth = 4f, pathEffect = dashEffect)
-
+                    for (y in listOf(topY, botY)) {
+                        // dark outline underneath, so the line stays visible on light backgrounds
+                        drawLine(color = Color.Black.copy(alpha = 0.6f), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 7.dp.toPx(), pathEffect = dashEffect)
+                        // dashed yellow line on top
+                        drawLine(color = Color(0xFFFFEB3B), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 3.dp.toPx(), pathEffect = dashEffect)
+                    }
+                    
                     val center = Offset(size.width / 2f, size.height / 2f)
                     drawCircle(color = Color.White.copy(alpha = 0.35f), radius = 48.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
                     drawCircle(color = Color.White.copy(alpha = 0.85f), radius = 6.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
