@@ -505,9 +505,9 @@ fun WoodScanApp() {
                                 }
                             }
 
-                        val qualitySelector = QualitySelector.from(
-                            Quality.FHD,
-                            FallbackStrategy.higherQualityOrLowerThan(Quality.HD)
+                        val qualitySelector = QualitySelector.fromOrderedList(
+                            listOf(Quality.UHD, Quality.FHD, Quality.HD),
+                            FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
                         )
                         val recorder = Recorder.Builder()
                             .setQualitySelector(qualitySelector)
@@ -584,7 +584,7 @@ fun WoodScanApp() {
                         // dashed yellow line on top
                         drawLine(color = Color(0xFFFFEB3B), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 3.dp.toPx(), pathEffect = dashEffect)
                     }
-                    
+
                     val center = Offset(size.width / 2f, size.height / 2f)
                     drawCircle(color = Color.White.copy(alpha = 0.35f), radius = 48.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
                     drawCircle(color = Color.White.copy(alpha = 0.85f), radius = 6.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
