@@ -33,6 +33,9 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.FileOutputOptions
@@ -80,8 +83,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.platform.LocalContext
@@ -104,6 +109,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 // Photogrammetry & Woodpile CV Capture Thresholds
 object ScanConfig {
@@ -198,6 +204,7 @@ fun WoodScanApp() {
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
     var isRecording by remember { mutableStateOf(false) }
     var isAeAfLocked by remember { mutableStateOf(false) }
+    var calibMode by remember { mutableStateOf(false) }   // modalità video di calibrazione
     var recordStartMs by remember { mutableLongStateOf(0L) }
     var elapsedSec by remember { mutableIntStateOf(0) }
 
@@ -208,6 +215,10 @@ fun WoodScanApp() {
     var tempVideoFile by remember { mutableStateOf<File?>(null) }
     var currentVideoName by remember { mutableStateOf("") }
     val logger = remember { CaptureLogger(context) }
+
+    // Guida alla calibrazione: rileva la scacchiera nei frame di analisi e misura la copertura
+    var calibStatus by remember { mutableStateOf(CalibStatus()) }
+    val calibGuide = remember { CalibrationGuide { calibStatus = it } }
 
     DisposableEffect(simMode) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -330,7 +341,19 @@ fun WoodScanApp() {
         else -> "ok" to "Steady"
     }
 
-    val coachingText = if (issues.isEmpty()) {
+    // In modalità calibrazione i controlli della catasta non contano: decide la guida
+    val calibHint = computeCalibHint(calibStatus, isRecording, isAeAfLocked, rotSpeed)
+    val headerStatus = if (calibMode) {
+        when (calibHint.level) {
+            HintLevel.OK -> "ok"
+            HintLevel.WARN -> "warn"
+            HintLevel.ERR -> "err"
+        }
+    } else severity
+
+    val coachingText = if (calibMode) {
+        calibHint.text
+    } else if (issues.isEmpty()) {
         if (isRecording) "Great! Keep walking horizontally parallel to the pile."
         else "All checks passed! Lock AE/AF, press Record, and walk parallel."
     } else {
@@ -392,6 +415,7 @@ fun WoodScanApp() {
             activeRecording = null
             isRecording = false
             elapsedSec = 0
+            calibGuide.accumulate = false
         } else {
             if (tempVideoFile != null) return   // la registrazione precedente non è ancora chiusa
             telemetryLog.clear()
@@ -399,13 +423,21 @@ fun WoodScanApp() {
 
             // NEW: Record to a hidden cache file instead of the public gallery
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            currentVideoName = "woodpile_scan_$timestamp.mp4"
+            // il prefisso "calib_" identifica i video di calibrazione (usato anche dal modal)
+            val prefix = if (calibMode) "calib" else "woodpile_scan"
+            currentVideoName = "${prefix}_$timestamp.mp4"
             val file = File(context.cacheDir, currentVideoName)
             tempVideoFile = file
             if (!logger.start(context.cacheDir, currentVideoName.removeSuffix(".mp4")))
                 Toast.makeText(context, "Orientation sensor not available: IMU not logged", Toast.LENGTH_LONG).show()
 
             val outputOptions = FileOutputOptions.Builder(file).build()
+
+            // la copertura si conta da zero, solo durante la registrazione di calibrazione
+            if (calibMode) {
+                calibGuide.reset()
+                calibGuide.accumulate = true
+            }
 
             isRecording = true
             activeRecording = videoCapture.output
@@ -430,6 +462,7 @@ fun WoodScanApp() {
     val colorOk = Color(0xFF10B981)
     val colorWarn = Color(0xFFF59E0B)
     val colorErr = Color(0xFFEF4444)
+    val colorCalib = Color(0xFF3B82F6)
     val glassBg = Color(0xC80F172A)
 
     fun statusColor(status: String): Color = when (status) {
@@ -451,11 +484,30 @@ fun WoodScanApp() {
 
                     cameraProviderFuture.addListener({
                         val cameraProvider = cameraProviderFuture.get()
+
+                        // Preview e analisi in 16:9 come il video: l'operatore vede (e la guida analizza)
+                        // lo stesso campo di vista che viene registrato. Il default di CameraX è 4:3.
                         val preview = Preview.Builder()
+                            .setResolutionSelector(
+                                ResolutionSelector.Builder()
+                                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                                    .build()
+                            )
                             .also { Camera2Interop.Extender(it).setSessionCaptureCallback(logger.frameCallback) }
                             .build().also { it.surfaceProvider = previewView.surfaceProvider }
 
                         val imageAnalysis = ImageAnalysis.Builder()
+                            .setResolutionSelector(
+                                ResolutionSelector.Builder()
+                                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                                    .setResolutionStrategy(
+                                        ResolutionStrategy(
+                                            android.util.Size(640, 360),
+                                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                        )
+                                    )
+                                    .build()
+                            )
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                             .build()
                             .also { analysis ->
@@ -523,6 +575,8 @@ fun WoodScanApp() {
                                             }
                                             prevSampledLuma = currentGrid
                                         }
+                                        // rilevamento della scacchiera (limitato internamente a ~5 Hz)
+                                        if (calibMode) calibGuide.process(image)
                                     } finally {
                                         image.close()
                                     }
@@ -555,6 +609,11 @@ fun WoodScanApp() {
                     }, ContextCompat.getMainExecutor(ctx))
 
                     previewView
+                },
+                // In calibrazione la preview non viene ritagliata: si vede tutto il fotogramma registrato
+                update = { view ->
+                    view.scaleType = if (calibMode) PreviewView.ScaleType.FIT_CENTER
+                    else PreviewView.ScaleType.FILL_CENTER
                 }
             )
         }
@@ -566,17 +625,22 @@ fun WoodScanApp() {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                        .background(if (severity == "err") Color(0xC87F1D1D) else glassBg)
-                        .border(1.5.dp, statusColor(severity), RoundedCornerShape(12.dp))
+                        .background(if (headerStatus == "err") Color(0xC87F1D1D) else glassBg)
+                        .border(1.5.dp, statusColor(headerStatus), RoundedCornerShape(12.dp))
                         .padding(horizontal = 14.dp, vertical = 10.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(statusColor(severity)))
+                        Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(statusColor(headerStatus)))
                         Spacer(modifier = Modifier.size(8.dp))
                         Text(
                             text = when {
+                                calibMode -> when {
+                                    isRecording && calibStatus.complete -> "CALIBRAZIONE — COMPLETA"
+                                    isRecording -> "CALIBRAZIONE — REC"
+                                    else -> "MODALITÀ CALIBRAZIONE"
+                                }
                                 isRecording && severity == "ok" -> "RECORDING — OPTIMAL"
                                 severity == "ok" -> "READY TO SCAN WOODPILE"
                                 severity == "warn" -> "MINOR ADJUSTMENT ADVISED"
@@ -591,45 +655,75 @@ fun WoodScanApp() {
                 }
 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    MetricCard(modifier = Modifier.weight(1f), label = "HORIZON", value = String.format(Locale.US, "%+.1f°", roll), borderColor = statusColor(rollStatus))
-                    MetricCard(modifier = Modifier.weight(1f), label = "PITCH", value = String.format(Locale.US, "%+.1f°", pitch), borderColor = statusColor(pitchStatus))
-                    MetricCard(modifier = Modifier.weight(1f), label = "EXPOSURE", value = lightLabel, borderColor = statusColor(lightStatus))
-                    MetricCard(modifier = Modifier.weight(1f), label = "PACE/BLUR", value = paceLabel, borderColor = statusColor(paceStatus))
+                    if (calibMode) {
+                        // Avanzamento della calibrazione al posto delle metriche della catasta
+                        val s = calibStatus
+                        MetricCard(modifier = Modifier.weight(1f), label = "COPERTURA", value = "${s.coveragePct}%", borderColor = statusColor(if (s.coveragePct >= CalibConfig.MIN_COVERAGE_PCT) "ok" else "warn"))
+                        MetricCard(modifier = Modifier.weight(1f), label = "INCLINAZ.", value = "${s.tiltsDone}/4", borderColor = statusColor(if (s.tiltsDone == 4) "ok" else "warn"))
+                        MetricCard(modifier = Modifier.weight(1f), label = "DISTANZA", value = "${s.distDone}/2", borderColor = statusColor(if (s.distDone == 2) "ok" else "warn"))
+                        MetricCard(modifier = Modifier.weight(1f), label = "SCACCHIERA", value = if (s.detected) "Rilevata" else "—", borderColor = statusColor(if (s.detected) "ok" else "err"))
+                    } else {
+                        MetricCard(modifier = Modifier.weight(1f), label = "HORIZON", value = String.format(Locale.US, "%+.1f°", roll), borderColor = statusColor(rollStatus))
+                        MetricCard(modifier = Modifier.weight(1f), label = "PITCH", value = String.format(Locale.US, "%+.1f°", pitch), borderColor = statusColor(pitchStatus))
+                        MetricCard(modifier = Modifier.weight(1f), label = "EXPOSURE", value = lightLabel, borderColor = statusColor(lightStatus))
+                        MetricCard(modifier = Modifier.weight(1f), label = "PACE/BLUR", value = paceLabel, borderColor = statusColor(paceStatus))
+                    }
                 }
             }
 
             Box(modifier = Modifier.fillMaxWidth().weight(1f).padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val dashEffect = PathEffect.dashPathEffect(floatArrayOf(14.dp.toPx(), 8.dp.toPx()), 0f)
-                    val topY = size.height * 0.10f
-                    val botY = size.height * 0.90f
-                    for (y in listOf(topY, botY)) {
-                        // dark outline underneath, so the line stays visible on light backgrounds
-                        drawLine(color = Color.Black.copy(alpha = 0.6f), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 7.dp.toPx(), pathEffect = dashEffect)
-                        // dashed yellow line on top
-                        drawLine(color = Color(0xFFFFEB3B), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 3.dp.toPx(), pathEffect = dashEffect)
+                // le linee guida della catasta non servono in calibrazione (la griglia è disegnata più sotto)
+                if (!calibMode) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val dashEffect = PathEffect.dashPathEffect(floatArrayOf(14.dp.toPx(), 8.dp.toPx()), 0f)
+                        val topY = size.height * 0.10f
+                        val botY = size.height * 0.90f
+                        for (y in listOf(topY, botY)) {
+                            // dark outline underneath, so the line stays visible on light backgrounds
+                            drawLine(color = Color.Black.copy(alpha = 0.6f), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 7.dp.toPx(), pathEffect = dashEffect)
+                            // dashed yellow line on top
+                            drawLine(color = Color(0xFFFFEB3B), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 3.dp.toPx(), pathEffect = dashEffect)
+                        }
+
+                        val center = Offset(size.width / 2f, size.height / 2f)
+                        drawCircle(color = Color.White.copy(alpha = 0.35f), radius = 48.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
+                        drawCircle(color = Color.White.copy(alpha = 0.85f), radius = 6.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
+
+                        val pitchOffsetPx = (pitch.toFloat() * 2.2f).coerceIn(-45f, 45f).dp.toPx()
+                        val barColor = if (rollStatus == "ok" && pitchStatus == "ok") colorOk else statusColor(severity)
+                        val barCenter = Offset(center.x, center.y + pitchOffsetPx)
+                        val halfWidth = 75.dp.toPx()
+                        rotate(degrees = -roll.toFloat(), pivot = barCenter) {
+                            drawLine(color = barColor, start = Offset(barCenter.x - halfWidth, barCenter.y), end = Offset(barCenter.x + halfWidth, barCenter.y), strokeWidth = 3.5.dp.toPx())
+                        }
                     }
 
-                    val center = Offset(size.width / 2f, size.height / 2f)
-                    drawCircle(color = Color.White.copy(alpha = 0.35f), radius = 48.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
-                    drawCircle(color = Color.White.copy(alpha = 0.85f), radius = 6.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
-
-                    val pitchOffsetPx = (pitch.toFloat() * 2.2f).coerceIn(-45f, 45f).dp.toPx()
-                    val barColor = if (rollStatus == "ok" && pitchStatus == "ok") colorOk else statusColor(severity)
-                    val barCenter = Offset(center.x, center.y + pitchOffsetPx)
-                    val halfWidth = 75.dp.toPx()
-                    rotate(degrees = -roll.toFloat(), pivot = barCenter) {
-                        drawLine(color = barColor, start = Offset(barCenter.x - halfWidth, barCenter.y), end = Offset(barCenter.x + halfWidth, barCenter.y), strokeWidth = 3.5.dp.toPx())
+                    Column(modifier = Modifier.fillMaxSize().padding(vertical = 26.dp), verticalArrangement = Arrangement.SpaceBetween, horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("▲ ALIGN TOP OF WOODPILE INSIDE LINE ▲", color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 2.dp))
+                        Text("▼ ALIGN BOTTOM / GROUND INSIDE LINE ▼", color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 2.dp))
                     }
-                }
-
-                Column(modifier = Modifier.fillMaxSize().padding(vertical = 26.dp), verticalArrangement = Arrangement.SpaceBetween, horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("▲ ALIGN TOP OF WOODPILE INSIDE LINE ▲", color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 2.dp))
-                    Text("▼ ALIGN BOTTOM / GROUND INSIDE LINE ▼", color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 2.dp))
                 }
             }
 
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // Pulsante modalità calibrazione: bloccato durante la registrazione e finché
+                // il video precedente non è stato salvato o scartato
+                Button(
+                    onClick = {
+                        calibMode = !calibMode
+                        if (calibMode) calibGuide.reset()
+                    },
+                    enabled = !isRecording && tempVideoFile == null,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (calibMode) colorCalib else Color.White.copy(alpha = 0.15f)
+                    )
+                ) {
+                    Text(
+                        text = if (calibMode) "📐 Calibrazione attiva" else "📐 Calibrazione",
+                        color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold
+                    )
+                }
+
                 Text(text = coachingText, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.clip(RoundedCornerShape(50)).background(glassBg).border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(50)).padding(horizontal = 16.dp, vertical = 9.dp))
 
                 if (simMode) {
@@ -656,8 +750,94 @@ fun WoodScanApp() {
             }
         }
 
+        // Overlay di calibrazione: griglia di copertura allineata al fotogramma registrato
+        // (la preview è in FIT_CENTER), cella obiettivo in giallo, scacchiera rilevata in ciano.
+        // È disegnato sopra l'interfaccia perché barra di stato e controlli coprono i bordi dell'immagine.
+        if (calibMode && !showSummaryModal) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val s = calibStatus
+                val aspect = s.frameAspect
+                val frameW: Float
+                val frameH: Float
+                if (size.width / size.height > aspect) {
+                    frameH = size.height; frameW = frameH * aspect
+                } else {
+                    frameW = size.width; frameH = frameW / aspect
+                }
+                val left = (size.width - frameW) / 2f
+                val top = (size.height - frameH) / 2f
+                val cellW = frameW / s.gridCols
+                val cellH = frameH / s.gridRows
+                fun cellTopLeft(i: Int) = Offset(left + (i % s.gridCols) * cellW, top + (i / s.gridCols) * cellH)
+
+                val covered = s.covered
+                for (i in covered.indices) {
+                    val tl = cellTopLeft(i)
+                    if (covered[i]) drawRect(colorOk.copy(alpha = 0.25f), tl, Size(cellW, cellH))
+                    else if (isRecording) drawRect(colorErr.copy(alpha = 0.12f), tl, Size(cellW, cellH))
+                    drawRect(Color.White.copy(alpha = 0.35f), tl, Size(cellW, cellH), style = Stroke(width = 1.dp.toPx()))
+                }
+                calibHint.targetCell?.let { i ->
+                    drawRect(Color(0xFFFFEB3B), cellTopLeft(i), Size(cellW, cellH), style = Stroke(width = 4.dp.toPx()))
+                }
+                s.quad?.let { q ->
+                    for (k in 0 until 4) {
+                        val j = (k + 1) % 4
+                        drawLine(
+                            color = Color(0xFF22D3EE),
+                            start = Offset(left + q[2 * k] * frameW, top + q[2 * k + 1] * frameH),
+                            end = Offset(left + q[2 * j] * frameW, top + q[2 * j + 1] * frameH),
+                            strokeWidth = 3.dp.toPx()
+                        )
+                    }
+                }
+
+                // Fase viste di sbieco: lato della scacchiera da avvicinare, evidenziato in giallo
+                val targetSide = calibHint.targetSide
+                val sideEdges = s.liveSideEdge
+                val q = s.quad
+                if (targetSide != null && sideEdges != null && q != null) {
+                    val k = sideEdges[targetSide]
+                    val j = (k + 1) % 4
+                    drawLine(
+                        color = Color(0xFFFFEB3B),
+                        start = Offset(left + q[2 * k] * frameW, top + q[2 * k + 1] * frameH),
+                        end = Offset(left + q[2 * j] * frameW, top + q[2 * j + 1] * frameH),
+                        strokeWidth = 9.dp.toPx(),
+                        cap = StrokeCap.Round
+                    )
+                }
+
+                // Fase distanze: riquadro tratteggiato centrato, con l'area obiettivo e le proporzioni
+                // del contorno attuale, da raggiungere (vicino) o in cui stare (lontano)
+                calibHint.targetArea?.let { area ->
+                    val aspectPx = if (q != null) {
+                        val xs = listOf(q[0], q[2], q[4], q[6])
+                        val ys = listOf(q[1], q[3], q[5], q[7])
+                        ((xs.max() - xs.min()) * frameW) / ((ys.max() - ys.min()) * frameH).coerceAtLeast(1f)
+                    } else 0.75f
+                    var hN = sqrt(area * frameW / (aspectPx * frameH))
+                    var wN = area / hN
+                    val shrink = minOf(1f, 0.95f / wN, 0.95f / hN)   // resta dentro l'immagine
+                    wN *= shrink; hN *= shrink
+                    val rw = wN * frameW
+                    val rh = hN * frameH
+                    drawRect(
+                        color = Color.White,
+                        topLeft = Offset(left + (frameW - rw) / 2f, top + (frameH - rh) / 2f),
+                        size = Size(rw, rh),
+                        style = Stroke(
+                            width = 3.dp.toPx(),
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(16.dp.toPx(), 10.dp.toPx()), 0f)
+                        )
+                    )
+                }
+            }
+        }
+
         // Post-Recording Video Review Modal
         if (showSummaryModal) {
+            val isCalib = currentVideoName.startsWith("calib_")
             val total = telemetryLog.size.coerceAtLeast(1)
             val validFrames = telemetryLog.count { it.qualityStatus != "err" }
             val scorePct = ((validFrames.toDouble() / total) * 100).roundToInt()
@@ -677,7 +857,7 @@ fun WoodScanApp() {
                         .padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text("Review Scan", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text(if (isCalib) "Review Calibration" else "Review Scan", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
 
                     // NEW: Video Playback Player
                     if (tempVideoFile != null && tempVideoFile!!.exists()) {
@@ -703,31 +883,52 @@ fun WoodScanApp() {
                         Text("Preview unavailable", color = Color.Gray, modifier = Modifier.padding(20.dp))
                     }
 
-                    Text(
-                        text = "Quality Score: $scorePct%",
-                        color = if (scorePct >= 85) colorOk else colorWarn,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
-                    )
+                    // Il quality score è pensato per la scansione della catasta, non per la calibrazione:
+                    // per la calibrazione si mostra il riepilogo della guida
+                    if (isCalib) {
+                        val s = calibStatus
+                        Text(
+                            text = "Copertura ${s.coveragePct}% · Inclinazioni ${s.tiltsDone}/4 · Distanze ${s.distDone}/2",
+                            color = if (s.complete) colorOk else colorWarn,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                        if (!s.complete) {
+                            Text("Ripresa incompleta: conviene scartarla e rifarla", color = colorWarn, fontSize = 12.sp)
+                        }
+                    } else {
+                        Text(
+                            text = "Quality Score: $scorePct%",
+                            color = if (scorePct >= 85) colorOk else colorWarn,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         // SAVE BUTTON
                         Button(
                             onClick = {
                                 tempVideoFile?.let { file ->
-                                    exportVideo(context, file, currentVideoName)
-                                    Toast.makeText(context, "Saved to Gallery & JSON Exported", Toast.LENGTH_SHORT).show()
+                                    // Download/WoodScanPro/calibrazione oppure Download/WoodScanPro/Scansione_NN
+                                    val folder = if (isCalib) CALIBRATION_FOLDER else nextScanFolder(context)
+                                    exportVideo(context, file, currentVideoName, folder)
+                                    Toast.makeText(context, "Salvato in $ROOT_DIR/$folder", Toast.LENGTH_SHORT).show()
 
-                                    // Export JSON matching the video name
-                                    val jsonName = currentVideoName.replace(".mp4", ".json")
-                                    exportTelemetryJson(context, telemetryLog, jsonName)
+                                    // Export JSON matching the video name (solo per le scansioni:
+                                    // la telemetria di qualità non serve per la calibrazione)
+                                    if (!isCalib) {
+                                        val jsonName = currentVideoName.replace(".mp4", ".json")
+                                        exportTelemetryJson(context, telemetryLog, jsonName, folder)
+                                    }
 
-                                    logger.files.forEach { exportFile(context, it) }
+                                    logger.files.forEach { exportFile(context, it, folder) }
                                     logger.deleteFiles()
                                     // Clean up temporary file
                                     file.delete()
                                     tempVideoFile = null
                                 }
+                                if (isCalib) calibMode = false   // dopo il salvataggio si torna alla scansione
                                 showSummaryModal = false
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = colorOk),
@@ -736,7 +937,7 @@ fun WoodScanApp() {
                             Text("Save Data", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
 
-                        // DISCARD BUTTON
+                        // DISCARD BUTTON (in calibrazione la modalità resta attiva, per rifare subito il video)
                         Button(
                             onClick = {
                                 tempVideoFile?.delete() // Instantly delete the cache file
@@ -772,7 +973,7 @@ fun SimSliderRow(label: String, value: Float, range: ClosedFloatingPointRange<Fl
     }
 }
 
-fun exportTelemetryJson(context: Context, samples: List<TelemetrySample>, fileName: String) {
+fun exportTelemetryJson(context: Context, samples: List<TelemetrySample>, fileName: String, folder: String) {
     try {
         val root = JSONObject()
         root.put("capturedAt", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date()))
@@ -797,7 +998,7 @@ fun exportTelemetryJson(context: Context, samples: List<TelemetrySample>, fileNa
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, fileName)
                 put(MediaStore.Downloads.MIME_TYPE, "application/json")
-                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/WoodScanPro")
+                put(MediaStore.Downloads.RELATIVE_PATH, relativePath(folder))
             }
             val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
             uri?.let {
@@ -806,45 +1007,98 @@ fun exportTelemetryJson(context: Context, samples: List<TelemetrySample>, fileNa
                 }
             }
         } else {
-            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "WoodScanPro").apply { mkdirs() }
-            File(dir, fileName).writeText(root.toString(2))
+            File(legacyDir(folder), fileName).writeText(root.toString(2))
         }
     } catch (e: Exception) {
         Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
     }
 }
 
-/** Salva il video in Movies/WoodScanPro (visibile anche nella Galleria). */
-fun exportVideo(context: Context, file: File, name: String) {
+/**
+ * Salva il video in Download/WoodScanPro/<folder>, nella stessa cartella dei log (_imu.csv, _frames.csv, _meta.json),
+ * così sul PC video e log restano insieme. (Movies/ su Android 10+ accetterebbe solo file video.)
+ */
+fun exportVideo(context: Context, file: File, name: String, folder: String) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-            put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/WoodScanPro")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath(folder))
         }
-        val uri = context.contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values) ?: return
+        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
         context.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
     } else {
-        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "WoodScanPro").apply { mkdirs() }
-        val dest = File(dir, name)
+        val dest = File(legacyDir(folder), name)
         file.copyTo(dest, overwrite = true)
         MediaScannerConnection.scanFile(context, arrayOf(dest.absolutePath), arrayOf("video/mp4"), null)
     }
 }
 
-/** Salva un file del logger in Download/WoodScanPro. */
-fun exportFile(context: Context, file: File) {
+/** Salva un file del logger in Download/WoodScanPro/<folder>. */
+fun exportFile(context: Context, file: File, folder: String) {
     val mime = if (file.extension == "csv") "text/csv" else "application/json"
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, file.name)
             put(MediaStore.Downloads.MIME_TYPE, mime)
-            put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/WoodScanPro")
+            put(MediaStore.Downloads.RELATIVE_PATH, relativePath(folder))
         }
         val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
         context.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
     } else {
-        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "WoodScanPro").apply { mkdirs() }
-        file.copyTo(File(dir, file.name), overwrite = true)
+        file.copyTo(File(legacyDir(folder), file.name), overwrite = true)
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Organizzazione delle cartelle:
+//   Download/WoodScanPro/calibrazione/   tutti i video di calibrazione con i loro log
+//   Download/WoodScanPro/Scansione_NN/   una cartella per ogni scansione salvata
+// ---------------------------------------------------------------------------------------------
+
+const val ROOT_DIR = "WoodScanPro"
+const val CALIBRATION_FOLDER = "calibrazione"
+private const val SCAN_PREFIX = "Scansione_"
+
+/** Percorso relativo per MediaStore (Android 10+). */
+private fun relativePath(folder: String) = "${Environment.DIRECTORY_DOWNLOADS}/$ROOT_DIR/$folder"
+
+/** Cartella su disco per Android 9 e precedenti (creata se manca). */
+private fun legacyDir(folder: String) =
+    File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "$ROOT_DIR/$folder").apply { mkdirs() }
+
+/**
+ * Nome della prossima cartella di scansione libera (Scansione_01, Scansione_02, ...).
+ * Il numero è il massimo tra le cartelle già presenti e l'ultimo numero salvato nelle preferenze,
+ * più uno: le preferenze coprono i casi in cui l'app non vede le cartelle esistenti (vedi nota sotto).
+ * Nota: su Android 10+ l'app vede solo i file creati da lei; dopo una reinstallazione non vede più le
+ * scansioni precedenti e, se anche le preferenze sono state cancellate, la numerazione riparte da 01.
+ */
+fun nextScanFolder(context: Context): String {
+    val prefs = context.getSharedPreferences("woodscan", Context.MODE_PRIVATE)
+    var maxN = prefs.getInt("last_scan_number", 0)
+    val regex = Regex("$SCAN_PREFIX(\\d+)")
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        context.contentResolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.MediaColumns.RELATIVE_PATH),
+            "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
+            arrayOf("${relativePath(SCAN_PREFIX)}%"),
+            null
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                regex.find(cursor.getString(0) ?: "")?.let { maxN = maxOf(maxN, it.groupValues[1].toInt()) }
+            }
+        }
+    } else {
+        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), ROOT_DIR)
+            .listFiles()?.forEach { f ->
+                regex.matchEntire(f.name)?.let { maxN = maxOf(maxN, it.groupValues[1].toInt()) }
+            }
+    }
+
+    val next = maxN + 1
+    prefs.edit().putInt("last_scan_number", next).apply()
+    return String.format(Locale.US, "%s%02d", SCAN_PREFIX, next)
 }
