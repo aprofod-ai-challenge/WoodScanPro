@@ -12,6 +12,7 @@ import android.hardware.camera2.CaptureRequest
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.MediaController
@@ -28,6 +29,7 @@ import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.DynamicRange
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -120,10 +122,12 @@ object ScanConfig {
     const val MIN_LUMA_OK = 55.0
     const val MAX_LUMA_OK = 205.0
     const val MAX_CLIP_PCT = 18.0
-    const val MAX_ROTATION_RATE = 35.0
+    const val MAX_ROTATION_RATE = 50.0   // era 35: troppo sensibile
     const val MIN_FLOW_RECORDING = 1.2
-    const val MAX_FLOW_OK = 18.0
-    const val MIN_SHARPNESS = 6.5
+    const val MAX_FLOW_OK = 26.0         // era 18: troppo sensibile
+    const val MIN_SHARPNESS = 5.0        // era 6.5
+    // Peso del nuovo campione nella media mobile di flow/rotazione: più basso = brevi scatti ignorati
+    const val PACE_SMOOTHING = 0.15
 }
 
 data class TelemetrySample(
@@ -250,7 +254,7 @@ fun WoodScanApp() {
                         val wy = Math.toDegrees(event.values[1].toDouble())
                         val wz = Math.toDegrees(event.values[2].toDouble())
                         val mag = hypot(wx, hypot(wy, wz))
-                        rotSpeed = rotSpeed * 0.7 + mag * 0.3
+                        rotSpeed = rotSpeed * (1 - ScanConfig.PACE_SMOOTHING) + mag * ScanConfig.PACE_SMOOTHING
                     }
                 }
             }
@@ -351,14 +355,15 @@ fun WoodScanApp() {
         }
     } else severity
 
-    val coachingText = if (calibMode) {
-        calibHint.text
-    } else if (issues.isEmpty()) {
-        if (isRecording) "Great! Keep walking horizontally parallel to the pile."
-        else "All checks passed! Lock AE/AF, press Record, and walk parallel."
-    } else {
-        issues.first()
-    }
+//    val coachingText = if (calibMode) {
+//        calibHint.text
+//    }
+//    else if (issues.isEmpty()) {
+//        if (isRecording) "Great! Keep walking horizontally parallel to the pile."
+//        else "All checks passed! Lock AE/AF, press Record, and walk parallel."
+//    } else {
+//        issues.first()
+//    }
 
     LaunchedEffect(isRecording) {
         while (isRecording) {
@@ -487,10 +492,20 @@ fun WoodScanApp() {
 
                         // Preview e analisi in 16:9 come il video: l'operatore vede (e la guida analizza)
                         // lo stesso campo di vista che viene registrato. Il default di CameraX è 4:3.
-                        val preview = Preview.Builder()
+                        // capPreview = true limita la preview a 720p: lo schermo non ne risente, ma libera
+                        // banda allo stream video su dispositivi che non reggono preview + analisi + video a piena risoluzione.
+                        fun buildPreview(capPreview: Boolean): Preview = Preview.Builder()
                             .setResolutionSelector(
                                 ResolutionSelector.Builder()
                                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                                    .also {
+                                        if (capPreview) it.setResolutionStrategy(
+                                            ResolutionStrategy(
+                                                android.util.Size(1280, 720),
+                                                ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER
+                                            )
+                                        )
+                                    }
                                     .build()
                             )
                             .also { Camera2Interop.Extender(it).setSessionCaptureCallback(logger.frameCallback) }
@@ -571,7 +586,7 @@ fun WoodScanApp() {
                                             if (gradCount > 0) sharpness = gradSum.toDouble() / gradCount
                                             if (prevSampledLuma != null && !simMode) {
                                                 val rawFlow = flowDiffSum.toDouble() / totalSamples
-                                                frameFlow = frameFlow * 0.6 + rawFlow * 0.4
+                                                frameFlow = frameFlow * (1 - ScanConfig.PACE_SMOOTHING) + rawFlow * ScanConfig.PACE_SMOOTHING
                                             }
                                             prevSampledLuma = currentGrid
                                         }
@@ -583,29 +598,56 @@ fun WoodScanApp() {
                                 }
                             }
 
-                        val qualitySelector = QualitySelector.fromOrderedList(
-                            listOf(Quality.UHD, Quality.FHD, Quality.HD),
-                            FallbackStrategy.lowerQualityOrHigherThan(Quality.SD)
-                        )
+                        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                        val cameraInfo = cameraSelector.filter(cameraProvider.availableCameraInfos).firstOrNull()
+
+                        // Qualità massima che la fotocamera dichiara per la registrazione (es. FHD = 1920x1080)
+                        val qualityRank = listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD)
+                        val supported = cameraInfo?.let {
+                            Recorder.getVideoCapabilities(it).getSupportedQualities(DynamicRange.SDR)
+                        }.orEmpty()
+                        val bestQuality = qualityRank.firstOrNull { it in supported } ?: Quality.FHD
+                        val targetSize = cameraInfo?.let { QualitySelector.getResolution(it, bestQuality) }
+                        Log.i(VIDEO_TAG, "Qualità supportate: $supported -> richiesta $bestQuality ($targetSize)")
+
                         val recorder = Recorder.Builder()
-                            .setQualitySelector(qualitySelector)
+                            .setQualitySelector(
+                                QualitySelector.from(bestQuality, FallbackStrategy.lowerQualityThan(bestQuality))
+                            )
                             .build()
                         val videoCapture = VideoCapture.withOutput(recorder)
                         videoCaptureRef = videoCapture
 
-                        try {
+                        fun bindAll(capPreview: Boolean): Boolean = try {
                             cameraProvider.unbindAll()
                             cameraRef = cameraProvider.bindToLifecycle(
                                 lifecycleOwner,
-                                CameraSelector.DEFAULT_BACK_CAMERA,
-                                preview,
+                                cameraSelector,
+                                buildPreview(capPreview),
                                 imageAnalysis,
                                 videoCapture
                             )
-                            logger.onCameraBound(cameraRef!!)
+                            true
                         } catch (e: Exception) {
-                            e.printStackTrace()
+                            Log.e(VIDEO_TAG, "Bind fallito (capPreview=$capPreview)", e)
+                            false
                         }
+
+                        fun videoIsDowngraded(): Boolean {
+                            val actual = videoCapture.resolutionInfo?.resolution ?: return false
+                            val target = targetSize ?: return false
+                            return minOf(actual.width, actual.height) < minOf(target.width, target.height)
+                        }
+
+                        // 1° tentativo: preview a piena risoluzione. Se CameraX ha dovuto abbassare il video
+                        // per far stare insieme preview + analisi + video, si riprova con la preview a 720p.
+                        var bound = bindAll(capPreview = false)
+                        if (!bound || videoIsDowngraded()) {
+                            Log.w(VIDEO_TAG, "Video ridotto a ${videoCapture.resolutionInfo?.resolution}, riprovo con preview a 720p")
+                            bound = bindAll(capPreview = true)
+                        }
+                        Log.i(VIDEO_TAG, "Risoluzione video finale: ${videoCapture.resolutionInfo?.resolution}")
+                        if (bound) logger.onCameraBound(cameraRef!!)
                     }, ContextCompat.getMainExecutor(ctx))
 
                     previewView
@@ -616,6 +658,36 @@ fun WoodScanApp() {
                     else PreviewView.ScaleType.FILL_CENTER
                 }
             )
+        }
+
+        // FULL-SCREEN CANVAS FOR LINES (Moved outside the Column)
+        if (!calibMode) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val dashEffect = PathEffect.dashPathEffect(floatArrayOf(14.dp.toPx(), 8.dp.toPx()), 0f)
+
+                // Now size.height is the full screen height!
+                val topY = size.height * 0.18f
+                val botY = size.height * 0.82f
+
+                for (y in listOf(topY, botY)) {
+                    // dark outline underneath, so the line stays visible on light backgrounds
+                    drawLine(color = Color.Black.copy(alpha = 0.6f), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 7.dp.toPx(), pathEffect = dashEffect)
+                    // dashed yellow line on top
+                    drawLine(color = Color(0xFFFFEB3B), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 3.dp.toPx(), pathEffect = dashEffect)
+                }
+
+                val center = Offset(size.width / 2f, size.height / 2f)
+                drawCircle(color = Color.White.copy(alpha = 0.35f), radius = 48.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
+                drawCircle(color = Color.White.copy(alpha = 0.85f), radius = 6.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
+
+                val pitchOffsetPx = (pitch.toFloat() * 2.2f).coerceIn(-45f, 45f).dp.toPx()
+                val barColor = if (rollStatus == "ok" && pitchStatus == "ok") colorOk else statusColor(severity)
+                val barCenter = Offset(center.x, center.y + pitchOffsetPx)
+                val halfWidth = 75.dp.toPx()
+                rotate(degrees = -roll.toFloat(), pivot = barCenter) {
+                    drawLine(color = barColor, start = Offset(barCenter.x - halfWidth, barCenter.y), end = Offset(barCenter.x + halfWidth, barCenter.y), strokeWidth = 3.5.dp.toPx())
+                }
+            }
         }
 
         Column(
@@ -671,33 +743,9 @@ fun WoodScanApp() {
                 }
             }
 
+            // Middle Spacer (Just empty space now, with the text labels)
             Box(modifier = Modifier.fillMaxWidth().weight(1f).padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-                // le linee guida della catasta non servono in calibrazione (la griglia è disegnata più sotto)
                 if (!calibMode) {
-                    Canvas(modifier = Modifier.fillMaxSize()) {
-                        val dashEffect = PathEffect.dashPathEffect(floatArrayOf(14.dp.toPx(), 8.dp.toPx()), 0f)
-                        val topY = size.height * 0.10f
-                        val botY = size.height * 0.90f
-                        for (y in listOf(topY, botY)) {
-                            // dark outline underneath, so the line stays visible on light backgrounds
-                            drawLine(color = Color.Black.copy(alpha = 0.6f), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 7.dp.toPx(), pathEffect = dashEffect)
-                            // dashed yellow line on top
-                            drawLine(color = Color(0xFFFFEB3B), start = Offset(0f, y), end = Offset(size.width, y), strokeWidth = 3.dp.toPx(), pathEffect = dashEffect)
-                        }
-
-                        val center = Offset(size.width / 2f, size.height / 2f)
-                        drawCircle(color = Color.White.copy(alpha = 0.35f), radius = 48.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
-                        drawCircle(color = Color.White.copy(alpha = 0.85f), radius = 6.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
-
-                        val pitchOffsetPx = (pitch.toFloat() * 2.2f).coerceIn(-45f, 45f).dp.toPx()
-                        val barColor = if (rollStatus == "ok" && pitchStatus == "ok") colorOk else statusColor(severity)
-                        val barCenter = Offset(center.x, center.y + pitchOffsetPx)
-                        val halfWidth = 75.dp.toPx()
-                        rotate(degrees = -roll.toFloat(), pivot = barCenter) {
-                            drawLine(color = barColor, start = Offset(barCenter.x - halfWidth, barCenter.y), end = Offset(barCenter.x + halfWidth, barCenter.y), strokeWidth = 3.5.dp.toPx())
-                        }
-                    }
-
                     Column(modifier = Modifier.fillMaxSize().padding(vertical = 26.dp), verticalArrangement = Arrangement.SpaceBetween, horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("▲ ALIGN TOP OF WOODPILE INSIDE LINE ▲", color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 2.dp))
                         Text("▼ ALIGN BOTTOM / GROUND INSIDE LINE ▼", color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 2.dp))
@@ -724,7 +772,10 @@ fun WoodScanApp() {
                     )
                 }
 
-                Text(text = coachingText, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.clip(RoundedCornerShape(50)).background(glassBg).border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(50)).padding(horizontal = 16.dp, vertical = 9.dp))
+                if (calibMode) {
+                    val coachingText = calibHint.text
+                    Text(text = coachingText, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.clip(RoundedCornerShape(50)).background(glassBg).border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(50)).padding(horizontal = 16.dp, vertical = 9.dp))
+                }
 
                 if (simMode) {
                     Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(glassBg).padding(horizontal = 12.dp, vertical = 6.dp)) {
@@ -838,9 +889,8 @@ fun WoodScanApp() {
         // Post-Recording Video Review Modal
         if (showSummaryModal) {
             val isCalib = currentVideoName.startsWith("calib_")
-            val total = telemetryLog.size.coerceAtLeast(1)
-            val validFrames = telemetryLog.count { it.qualityStatus != "err" }
-            val scorePct = ((validFrames.toDouble() / total) * 100).roundToInt()
+            val score = remember(telemetryLog.size) { ScanScore.compute(telemetryLog) }
+            val scorePct = score.total
 
             Box(
                 modifier = Modifier
@@ -899,9 +949,18 @@ fun WoodScanApp() {
                     } else {
                         Text(
                             text = "Quality Score: $scorePct%",
-                            color = if (scorePct >= 85) colorOk else colorWarn,
+                            color = when {
+                                scorePct >= 80 -> colorOk
+                                scorePct >= 50 -> colorWarn
+                                else -> colorErr
+                            },
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp
+                        )
+                        Text(
+                            text = "Motion ${score.motion}% · Sharpness ${score.sharpness}% · Level ${score.level}% · Light ${score.light}%",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 12.sp
                         )
                     }
 
@@ -990,6 +1049,7 @@ fun exportTelemetryJson(context: Context, samples: List<TelemetrySample>, fileNa
             obj.put("optical_flow", s.opticalFlow)
             obj.put("sharpness", s.sharpness)
             obj.put("quality_status", s.qualityStatus)
+            obj.put("frame_score", ScanScore.frameScore(s))
             arr.put(obj)
         }
         root.put("samples", arr)
@@ -1059,6 +1119,7 @@ fun exportFile(context: Context, file: File, folder: String) {
 const val ROOT_DIR = "WoodScanPro"
 const val CALIBRATION_FOLDER = "calibrazione"
 private const val SCAN_PREFIX = "Scansione_"
+private const val VIDEO_TAG = "WoodScanVideo"
 
 /** Percorso relativo per MediaStore (Android 10+). */
 private fun relativePath(folder: String) = "${Environment.DIRECTORY_DOWNLOADS}/$ROOT_DIR/$folder"
