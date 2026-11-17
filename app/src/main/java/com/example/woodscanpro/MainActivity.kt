@@ -285,12 +285,12 @@ fun WoodScanApp() {
         absRoll <= ScanConfig.MAX_ROLL_OK -> "ok"
         absRoll <= ScanConfig.MAX_ROLL_WARN -> {
             elevate("warn")
-            issues.add(if (roll > 0) "Level horizon (tilt left slightly)" else "Level horizon (tilt right slightly)")
+            issues.add(if (roll > 0) "Livella l'orizzonte (inclina un po' a sinistra)" else "Livella l'orizzonte (inclina un po' a destra)")
             "warn"
         }
         else -> {
             elevate("err")
-            issues.add(if (roll > 0) "Horizon crooked! Rotate counter-clockwise" else "Horizon crooked! Rotate clockwise")
+            issues.add(if (roll > 0) "Orizzonte storto! Ruota in senso antiorario" else "Orizzonte storto! Ruota in senso orario")
             "err"
         }
     }
@@ -299,12 +299,12 @@ fun WoodScanApp() {
         absPitch <= ScanConfig.MAX_PITCH_OK -> "ok"
         absPitch <= ScanConfig.MAX_PITCH_WARN -> {
             elevate("warn")
-            issues.add(if (pitch > 0) "Tilt camera UP slightly" else "Tilt camera DOWN slightly")
+            issues.add(if (pitch > 0) "Inclina la fotocamera un po' verso l'ALTO" else "Inclina la fotocamera un po' verso il BASSO")
             "warn"
         }
         else -> {
             elevate("err")
-            issues.add(if (pitch > 0) "Pointing too far down! Hold phone vertical" else "Pointing too far up! Hold phone vertical")
+            issues.add(if (pitch > 0) "Punti troppo in basso! Tieni il telefono verticale" else "Punti troppo in alto! Tieni il telefono verticale")
             "err"
         }
     }
@@ -312,13 +312,13 @@ fun WoodScanApp() {
     val (lightStatus, lightLabel) = when {
         luma < ScanConfig.MIN_LUMA_OK || underExposedPct > ScanConfig.MAX_CLIP_PCT -> {
             elevate("err")
-            issues.add("Image too dark — shadow detail between logs is lost")
-            "err" to "Too Dark"
+            issues.add("Immagine troppo scura: si perdono i dettagli tra i tronchi")
+            "err" to "Buio"
         }
         luma > ScanConfig.MAX_LUMA_OK || overExposedPct > ScanConfig.MAX_CLIP_PCT -> {
             elevate("warn")
-            issues.add("Overexposed highlights — avoid direct sun glare")
-            "warn" to "Glare/Bright"
+            issues.add("Zone sovraesposte: evita il riflesso diretto del sole")
+            "warn" to "Riflessi"
         }
         else -> "ok" to "${((luma / 255.0) * 100).roundToInt()}% OK"
     }
@@ -326,20 +326,20 @@ fun WoodScanApp() {
     val (paceStatus, paceLabel) = when {
         frameFlow > ScanConfig.MAX_FLOW_OK || rotSpeed > ScanConfig.MAX_ROTATION_RATE -> {
             elevate("err")
-            issues.add("Moving/panning too fast! Walk slowly parallel to the pile")
-            "err" to "Too Fast!"
+            issues.add("Movimento troppo veloce! Cammina piano parallelo alla catasta")
+            "err" to "Veloce!"
         }
         sharpness < ScanConfig.MIN_SHARPNESS -> {
             elevate("warn")
-            issues.add("Image looks blurry — steady your hands or check focus")
-            "warn" to "Soft/Blur"
+            issues.add("Immagine sfocata: tieni ferme le mani o controlla la messa a fuoco")
+            "warn" to "Sfocato"
         }
         isRecording && frameFlow < ScanConfig.MIN_FLOW_RECORDING -> {
             elevate("warn")
-            issues.add("Walk steadily sideways along the woodpile")
-            "warn" to "Stopped"
+            issues.add("Cammina con passo costante lungo la catasta")
+            "warn" to "Fermo"
         }
-        else -> "ok" to "Steady"
+        else -> "ok" to "Stabile"
     }
 
     // In modalità calibrazione i controlli della catasta non contano: decide la guida
@@ -397,7 +397,7 @@ fun WoodScanApp() {
                 .build()
             camera2Control.setCaptureRequestOptions(options)
             isAeAfLocked = true
-            Toast.makeText(context, "AE/AF & White Balance Locked", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "AE/AF e bilanciamento del bianco bloccati", Toast.LENGTH_SHORT).show()
         } else {
             cam.cameraControl.cancelFocusAndMetering()
             val options = CaptureRequestOptions.Builder()
@@ -406,7 +406,7 @@ fun WoodScanApp() {
                 .build()
             camera2Control.setCaptureRequestOptions(options)
             isAeAfLocked = false
-            Toast.makeText(context, "AE/AF Unlocked (Continuous)", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "AE/AF sbloccati (automatico)", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -431,7 +431,7 @@ fun WoodScanApp() {
             val file = File(context.cacheDir, currentVideoName)
             tempVideoFile = file
             if (!logger.start(context.cacheDir, currentVideoName.removeSuffix(".mp4"), exportOrientation = !calibMode))
-                Toast.makeText(context, "Orientation sensor not available: IMU not logged", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Sensore di orientamento non disponibile: IMU non registrata", Toast.LENGTH_LONG).show()
 
             val outputOptions = FileOutputOptions.Builder(file).build()
 
@@ -451,7 +451,7 @@ fun WoodScanApp() {
                             file.delete()
                             logger.deleteFiles()
                             tempVideoFile = null
-                            Toast.makeText(context, "Recording failed.", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Registrazione non riuscita.", Toast.LENGTH_SHORT).show()
                         } else {
                             logger.stop(file)
                             showSummaryModal = true
@@ -696,14 +696,14 @@ fun WoodScanApp() {
                     .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp))
                     .padding(horizontal = 8.dp, vertical = 2.dp)
                 Text(
-                    "▲ ALIGN TOP OF WOODPILE INSIDE LINE ▲",
+                    "▲ ALLINEA LA CIMA DELLA CATASTA ENTRO LA LINEA ▲",
                     color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.align(Alignment.TopCenter)
                         .offset(y = maxHeight * GUIDE_TOP_FRAC + gap)
                         .then(labelModifier)
                 )
                 Text(
-                    "▼ ALIGN BOTTOM / GROUND INSIDE LINE ▼",
+                    "▼ ALLINEA LA BASE / IL TERRENO ENTRO LA LINEA ▼",
                     color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.align(Alignment.BottomCenter)
                         .offset(y = -(maxHeight * (1f - GUIDE_BOTTOM_FRAC) + gap))
@@ -736,10 +736,10 @@ fun WoodScanApp() {
                                     isRecording -> "CALIBRAZIONE — REC"
                                     else -> "MODALITÀ CALIBRAZIONE"
                                 }
-                                isRecording && severity == "ok" -> "RECORDING — OPTIMAL"
-                                severity == "ok" -> "READY TO SCAN WOODPILE"
-                                severity == "warn" -> "MINOR ADJUSTMENT ADVISED"
-                                else -> "CORRECTION NEEDED"
+                                isRecording && severity == "ok" -> "REGISTRAZIONE — OTTIMALE"
+                                severity == "ok" -> "PRONTO A SCANSIONARE"
+                                severity == "warn" -> "PICCOLA CORREZIONE CONSIGLIATA"
+                                else -> "CORREZIONE NECESSARIA"
                             },
                             color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp
                         )
@@ -758,10 +758,10 @@ fun WoodScanApp() {
                         MetricCard(modifier = Modifier.weight(1f), label = "DISTANZA", value = "${s.distDone}/2", borderColor = statusColor(if (s.distDone == 2) "ok" else "warn"))
                         MetricCard(modifier = Modifier.weight(1f), label = "SCACCHIERA", value = if (s.detected) "Rilevata" else "—", borderColor = statusColor(if (s.detected) "ok" else "err"))
                     } else {
-                        MetricCard(modifier = Modifier.weight(1f), label = "HORIZON", value = String.format(Locale.US, "%+.1f°", roll), borderColor = statusColor(rollStatus))
-                        MetricCard(modifier = Modifier.weight(1f), label = "PITCH", value = String.format(Locale.US, "%+.1f°", pitch), borderColor = statusColor(pitchStatus))
-                        MetricCard(modifier = Modifier.weight(1f), label = "EXPOSURE", value = lightLabel, borderColor = statusColor(lightStatus))
-                        MetricCard(modifier = Modifier.weight(1f), label = "PACE/BLUR", value = paceLabel, borderColor = statusColor(paceStatus))
+                        MetricCard(modifier = Modifier.weight(1f), label = "ORIZZONTE", value = String.format(Locale.US, "%+.1f°", roll), borderColor = statusColor(rollStatus))
+                        MetricCard(modifier = Modifier.weight(1f), label = "INCLINAZ.", value = String.format(Locale.US, "%+.1f°", pitch), borderColor = statusColor(pitchStatus))
+                        MetricCard(modifier = Modifier.weight(1f), label = "LUCE", value = lightLabel, borderColor = statusColor(lightStatus))
+                        MetricCard(modifier = Modifier.weight(1f), label = "MOVIMENTO", value = paceLabel, borderColor = statusColor(paceStatus))
                     }
                 }
             }
@@ -782,7 +782,7 @@ fun WoodScanApp() {
                         // in calibrazione AE/AF non si blocca: il pulsante non c'è
                         if (!calibMode) {
                             Button(onClick = { toggleAeAfLock() }, colors = ButtonDefaults.buttonColors(containerColor = if (isAeAfLocked) colorWarn else Color.White.copy(alpha = 0.15f))) {
-                                Text(text = if (isAeAfLocked) "🔒 AE/AF Locked" else "Lock AE/AF", color = if (isAeAfLocked) Color.Black else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                Text(text = if (isAeAfLocked) "AE/AF bloccati" else "Blocca AE/AF", color = if (isAeAfLocked) Color.Black else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -942,7 +942,7 @@ fun WoodScanApp() {
                         .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Text(if (isCalib) "Review Calibration" else "Review Scan", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                    Text(if (isCalib) "Rivedi calibrazione" else "Rivedi scansione", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
 
                     // NEW: Video Playback Player
                     if (tempVideoFile != null && tempVideoFile!!.exists()) {
@@ -966,7 +966,7 @@ fun WoodScanApp() {
                                 .background(Color.Black)
                         )
                     } else {
-                        Text("Preview unavailable", color = Color.Gray, modifier = Modifier.padding(20.dp))
+                        Text("Anteprima non disponibile", color = Color.Gray, modifier = Modifier.padding(20.dp))
                     }
 
                     // Il quality score è pensato per la scansione della catasta, non per la calibrazione:
@@ -984,7 +984,7 @@ fun WoodScanApp() {
                         }
                     } else {
                         Text(
-                            text = "Quality Score: $scorePct%",
+                            text = "Punteggio qualità: $scorePct%",
                             color = when {
                                 scorePct >= 80 -> colorOk
                                 scorePct >= 50 -> colorWarn
@@ -994,7 +994,7 @@ fun WoodScanApp() {
                             fontSize = 14.sp
                         )
                         Text(
-                            text = "Motion ${score.motion}% · Sharpness ${score.sharpness}% · Level ${score.level}% · Light ${score.light}%",
+                            text = "Movimento ${score.motion}% · Nitidezza ${score.sharpness}% · Livello ${score.level}% · Luce ${score.light}%",
                             color = Color(0xFF94A3B8),
                             fontSize = 12.sp
                         )
@@ -1025,11 +1025,11 @@ fun WoodScanApp() {
                                         // si cancella solo a calcolo finito
                                         val videoName = currentVideoName
                                         scope.launch {
-                                            calibProgress = "Calibrating… 0%"
+                                            calibProgress = "Calibrazione in corso… 0%"
                                             val result = withContext(Dispatchers.Default) {
                                                 runCatching {
                                                     CalibrationExport.compute(file) { p ->
-                                                        calibProgress = "Calibrating… ${(p * 100).roundToInt()}%"
+                                                        calibProgress = "Calibrazione in corso… ${(p * 100).roundToInt()}%"
                                                     }
                                                 }
                                             }
@@ -1038,7 +1038,7 @@ fun WoodScanApp() {
                                             val r = result.getOrNull()
                                             if (r == null) {
                                                 result.exceptionOrNull()?.printStackTrace()
-                                                Toast.makeText(context, "Calibration failed: checkerboard not found", Toast.LENGTH_LONG).show()
+                                                Toast.makeText(context, "Calibrazione non riuscita: scacchiera non trovata", Toast.LENGTH_LONG).show()
                                                 return@launch
                                             }
                                             // storico accanto al video + calibration.json nella cartella principale,
@@ -1047,7 +1047,7 @@ fun WoodScanApp() {
                                             exportText(context, "calibration.json", "", r.json)
                                             Toast.makeText(
                                                 context,
-                                                String.format(Locale.US, "Calibration saved: RMS %.2f px, %d frames (%dx%d)", r.rms, r.used, r.width, r.height),
+                                                String.format(Locale.US, "Calibrazione salvata: RMS %.2f px, %d fotogrammi (%dx%d)", r.rms, r.used, r.width, r.height),
                                                 Toast.LENGTH_LONG
                                             ).show()
                                         }
@@ -1061,7 +1061,7 @@ fun WoodScanApp() {
                             colors = ButtonDefaults.buttonColors(containerColor = colorOk),
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Save Data", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            Text("Salva", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                         }
 
                         // DISCARD BUTTON (in calibrazione la modalità resta attiva, per rifare subito il video)
@@ -1075,7 +1075,7 @@ fun WoodScanApp() {
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
                             modifier = Modifier.weight(1f)
                         ) {
-                            Text("Discard", color = Color.White, fontSize = 13.sp)
+                            Text("Scarta", color = Color.White, fontSize = 13.sp)
                         }
                     }
                 }
@@ -1130,7 +1130,7 @@ fun exportTelemetryJson(context: Context, samples: List<TelemetrySample>, fileNa
             File(legacyDir(folder), fileName).writeText(root.toString(2))
         }
     } catch (e: Exception) {
-        Toast.makeText(context, "Export failed: ${e.message}", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "Esportazione non riuscita: ${e.message}", Toast.LENGTH_SHORT).show()
     }
 }
 
