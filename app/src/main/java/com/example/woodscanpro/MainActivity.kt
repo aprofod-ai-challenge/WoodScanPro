@@ -54,6 +54,11 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -67,14 +72,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -91,6 +94,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -99,7 +103,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.rememberCoroutineScope
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -158,6 +166,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun WoodScanApp() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // testo di avanzamento della calibrazione calcolata sul telefono (null = nessun calcolo in corso)
+    var calibProgress by remember { mutableStateOf<String?>(null) }
     val lifecycleOwner = LocalLifecycleOwner.current
 
     var hasCameraPermission by remember {
@@ -198,11 +209,6 @@ fun WoodScanApp() {
     var frameFlow by remember { mutableDoubleStateOf(0.0) }
     var sharpness by remember { mutableDoubleStateOf(15.0) }
 
-    var simMode by remember { mutableStateOf(false) }
-    var simRoll by remember { mutableFloatStateOf(0f) }
-    var simPitch by remember { mutableFloatStateOf(0f) }
-    var simShake by remember { mutableFloatStateOf(2f) }
-
     var cameraRef by remember { mutableStateOf<Camera?>(null) }
     var videoCaptureRef by remember { mutableStateOf<VideoCapture<Recorder>?>(null) }
     var activeRecording by remember { mutableStateOf<Recording?>(null) }
@@ -224,7 +230,7 @@ fun WoodScanApp() {
     var calibStatus by remember { mutableStateOf(CalibStatus()) }
     val calibGuide = remember { CalibrationGuide { calibStatus = it } }
 
-    DisposableEffect(simMode) {
+    DisposableEffect(Unit) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
             ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -232,7 +238,6 @@ fun WoodScanApp() {
 
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
-                if (simMode) return
                 when (event.sensor.type) {
                     Sensor.TYPE_GRAVITY, Sensor.TYPE_ACCELEROMETER -> {
                         val gx = event.values[0].toDouble()
@@ -265,14 +270,6 @@ fun WoodScanApp() {
         onDispose { sensorManager.unregisterListener(listener) }
     }
 
-    LaunchedEffect(simMode, simRoll, simPitch, simShake) {
-        if (simMode) {
-            roll = simRoll.toDouble()
-            pitch = simPitch.toDouble()
-            frameFlow = simShake.toDouble()
-            rotSpeed = simShake.toDouble() * 1.8
-        }
-    }
 
     val absRoll = abs(roll)
     val absPitch = abs(pitch)
@@ -346,7 +343,7 @@ fun WoodScanApp() {
     }
 
     // In modalità calibrazione i controlli della catasta non contano: decide la guida
-    val calibHint = computeCalibHint(calibStatus, isRecording, isAeAfLocked, rotSpeed)
+    val calibHint = computeCalibHint(calibStatus, isRecording, rotSpeed)
     val headerStatus = if (calibMode) {
         when (calibHint.level) {
             HintLevel.OK -> "ok"
@@ -433,7 +430,7 @@ fun WoodScanApp() {
             currentVideoName = "${prefix}_$timestamp.mp4"
             val file = File(context.cacheDir, currentVideoName)
             tempVideoFile = file
-            if (!logger.start(context.cacheDir, currentVideoName.removeSuffix(".mp4")))
+            if (!logger.start(context.cacheDir, currentVideoName.removeSuffix(".mp4"), exportOrientation = !calibMode))
                 Toast.makeText(context, "Orientation sensor not available: IMU not logged", Toast.LENGTH_LONG).show()
 
             val outputOptions = FileOutputOptions.Builder(file).build()
@@ -584,7 +581,7 @@ fun WoodScanApp() {
                                             overExposedPct = (overCount.toDouble() / totalSamples) * 100.0
                                             underExposedPct = (underCount.toDouble() / totalSamples) * 100.0
                                             if (gradCount > 0) sharpness = gradSum.toDouble() / gradCount
-                                            if (prevSampledLuma != null && !simMode) {
+                                            if (prevSampledLuma != null) {
                                                 val rawFlow = flowDiffSum.toDouble() / totalSamples
                                                 frameFlow = frameFlow * (1 - ScanConfig.PACE_SMOOTHING) + rawFlow * ScanConfig.PACE_SMOOTHING
                                             }
@@ -666,8 +663,8 @@ fun WoodScanApp() {
                 val dashEffect = PathEffect.dashPathEffect(floatArrayOf(14.dp.toPx(), 8.dp.toPx()), 0f)
 
                 // Now size.height is the full screen height!
-                val topY = size.height * 0.18f
-                val botY = size.height * 0.82f
+                val topY = size.height * GUIDE_TOP_FRAC
+                val botY = size.height * GUIDE_BOTTOM_FRAC
 
                 for (y in listOf(topY, botY)) {
                     // dark outline underneath, so the line stays visible on light backgrounds
@@ -690,8 +687,34 @@ fun WoodScanApp() {
             }
         }
 
+        // Etichette delle linee guida: alla stessa distanza dalla rispettiva linea,
+        // sotto la linea in alto e sopra la linea in basso (cioè dentro la fascia)
+        if (!calibMode) {
+            BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                val gap = 8.dp
+                val labelModifier = Modifier
+                    .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+                Text(
+                    "▲ ALIGN TOP OF WOODPILE INSIDE LINE ▲",
+                    color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.TopCenter)
+                        .offset(y = maxHeight * GUIDE_TOP_FRAC + gap)
+                        .then(labelModifier)
+                )
+                Text(
+                    "▼ ALIGN BOTTOM / GROUND INSIDE LINE ▼",
+                    color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                        .offset(y = -(maxHeight * (1f - GUIDE_BOTTOM_FRAC) + gap))
+                        .then(labelModifier)
+                )
+            }
+        }
+
         Column(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp, vertical = 18.dp),
+            // safeDrawing: niente sotto la barra di stato, il foro della fotocamera o la barra di navigazione
+            modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).padding(horizontal = 14.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -699,13 +722,13 @@ fun WoodScanApp() {
                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                         .background(if (headerStatus == "err") Color(0xC87F1D1D) else glassBg)
                         .border(1.5.dp, statusColor(headerStatus), RoundedCornerShape(12.dp))
-                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                        .padding(horizontal = 12.dp, vertical = 2.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(statusColor(headerStatus)))
-                        Spacer(modifier = Modifier.size(8.dp))
+                        Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(statusColor(headerStatus)))
+                        Spacer(modifier = Modifier.size(6.dp))
                         Text(
                             text = when {
                                 calibMode -> when {
@@ -718,12 +741,12 @@ fun WoodScanApp() {
                                 severity == "warn" -> "MINOR ADJUSTMENT ADVISED"
                                 else -> "CORRECTION NEEDED"
                             },
-                            color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp
+                            color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp
                         )
                     }
                     val mins = (elapsedSec / 60).toString().padStart(2, '0')
                     val secs = (elapsedSec % 60).toString().padStart(2, '0')
-                    Text(text = if (isAeAfLocked) "🔒 $mins:$secs" else "$mins:$secs", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    Text(text = if (isAeAfLocked) "🔒 $mins:$secs" else "$mins:$secs", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -743,59 +766,52 @@ fun WoodScanApp() {
                 }
             }
 
-            // Middle Spacer (Just empty space now, with the text labels)
-            Box(modifier = Modifier.fillMaxWidth().weight(1f).padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
-                if (!calibMode) {
-                    Column(modifier = Modifier.fillMaxSize().padding(vertical = 26.dp), verticalArrangement = Arrangement.SpaceBetween, horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("▲ ALIGN TOP OF WOODPILE INSIDE LINE ▲", color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 2.dp))
-                        Text("▼ ALIGN BOTTOM / GROUND INSIDE LINE ▼", color = Color.White.copy(alpha = 0.78f), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 2.dp))
-                    }
-                }
-            }
+            // Middle Spacer (le etichette delle linee sono posizionate sopra, rispetto alle linee stesse)
+            Box(modifier = Modifier.fillMaxWidth().weight(1f))
 
-            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Pulsante modalità calibrazione: bloccato durante la registrazione e finché
-                // il video precedente non è stato salvato o scartato
-                Button(
-                    onClick = {
-                        calibMode = !calibMode
-                        if (calibMode) calibGuide.reset()
-                    },
-                    enabled = !isRecording && tempVideoFile == null,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (calibMode) colorCalib else Color.White.copy(alpha = 0.15f)
-                    )
-                ) {
-                    Text(
-                        text = if (calibMode) "📐 Calibrazione attiva" else "📐 Calibrazione",
-                        color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold
-                    )
-                }
-
+            // blocco di controllo in basso (Rec), un po' sollevato dal bordo
+            Column(modifier = Modifier.padding(bottom = 28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (calibMode) {
                     val coachingText = calibHint.text
                     Text(text = coachingText, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center, modifier = Modifier.clip(RoundedCornerShape(50)).background(glassBg).border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(50)).padding(horizontal = 16.dp, vertical = 9.dp))
                 }
 
-                if (simMode) {
-                    Column(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(glassBg).padding(horizontal = 12.dp, vertical = 6.dp)) {
-                        SimSliderRow("Sim Roll (°)", simRoll, -25f..25f) { simRoll = it }
-                        SimSliderRow("Sim Pitch (°)", simPitch, -25f..25f) { simPitch = it }
-                        SimSliderRow("Sim Speed", simShake, 0f..30f) { simShake = it }
-                    }
-                }
-
                 Row(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(glassBg).border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(20.dp)).padding(horizontal = 18.dp, vertical = 12.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Button(onClick = { toggleAeAfLock() }, colors = ButtonDefaults.buttonColors(containerColor = if (isAeAfLocked) colorWarn else Color.White.copy(alpha = 0.15f))) {
-                        Text(text = if (isAeAfLocked) "🔒 AE/AF Locked" else "Lock AE/AF", color = if (isAeAfLocked) Color.Black else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    // tre posizioni fisse: il pulsante Rec resta al centro anche senza Lock AE/AF
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+                        // in calibrazione AE/AF non si blocca: il pulsante non c'è
+                        if (!calibMode) {
+                            Button(onClick = { toggleAeAfLock() }, colors = ButtonDefaults.buttonColors(containerColor = if (isAeAfLocked) colorWarn else Color.White.copy(alpha = 0.15f))) {
+                                Text(text = if (isAeAfLocked) "🔒 AE/AF Locked" else "Lock AE/AF", color = if (isAeAfLocked) Color.Black else Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
                     }
 
                     Box(modifier = Modifier.size(66.dp).clip(CircleShape).border(4.dp, Color.White, CircleShape).clickable { toggleRecording() }, contentAlignment = Alignment.Center) {
                         Box(modifier = Modifier.size(if (isRecording) 28.dp else 50.dp).clip(if (isRecording) RoundedCornerShape(6.dp) else CircleShape).background(colorErr))
                     }
 
-                    Button(onClick = { simMode = !simMode }, colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.15f))) {
-                        Text(text = if (simMode) "Exit Sim" else "Test Sim", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
+                        // Pulsante modalità calibrazione: bloccato durante la registrazione e finché
+                        // il video precedente non è stato salvato o scartato
+                        Button(
+                            onClick = {
+                                calibMode = !calibMode
+                                if (calibMode) {
+                                    calibGuide.reset()
+                                    if (isAeAfLocked) toggleAeAfLock()   // in calibrazione AE/AF resta automatico
+                                }
+                            },
+                            enabled = !isRecording && tempVideoFile == null,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (calibMode) colorCalib else Color.White.copy(alpha = 0.15f)
+                            )
+                        ) {
+                            Text(
+                                text = "Calibrazione",   // attiva = sfondo colorato
+                                color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
                 }
             }
@@ -886,6 +902,24 @@ fun WoodScanApp() {
             }
         }
 
+        calibProgress?.let { text ->
+            Box(
+                modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).padding(top = 76.dp),
+                contentAlignment = Alignment.TopCenter
+            ) {
+                Text(
+                    text = text,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xE61E293B))
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+        }
+
         // Post-Recording Video Review Modal
         if (showSummaryModal) {
             val isCalib = currentVideoName.startsWith("calib_")
@@ -896,7 +930,8 @@ fun WoodScanApp() {
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color(0xEB090D16))
-                    .padding(22.dp),
+                    .windowInsetsPadding(WindowInsets.safeDrawing)
+                    .padding(12.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Column(
@@ -904,7 +939,7 @@ fun WoodScanApp() {
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(18.dp))
                         .background(Color(0xFF1E293B))
-                        .padding(20.dp),
+                        .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(if (isCalib) "Review Calibration" else "Review Scan", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
@@ -923,9 +958,10 @@ fun WoodScanApp() {
                                     start() // Auto-play the video
                                 }
                             },
+                            // anteprima grande: ~65% dell'altezza dello schermo (il video è verticale)
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(220.dp)
+                                .height((LocalConfiguration.current.screenHeightDp * 0.65f).dp)
                                 .clip(RoundedCornerShape(10.dp))
                                 .background(Color.Black)
                         )
@@ -983,9 +1019,41 @@ fun WoodScanApp() {
 
                                     logger.files.forEach { exportFile(context, it, folder) }
                                     logger.deleteFiles()
-                                    // Clean up temporary file
-                                    file.delete()
                                     tempVideoFile = null
+                                    if (isCalib) {
+                                        // calibration.json calcolato sul telefono; il video temporaneo
+                                        // si cancella solo a calcolo finito
+                                        val videoName = currentVideoName
+                                        scope.launch {
+                                            calibProgress = "Calibrating… 0%"
+                                            val result = withContext(Dispatchers.Default) {
+                                                runCatching {
+                                                    CalibrationExport.compute(file) { p ->
+                                                        calibProgress = "Calibrating… ${(p * 100).roundToInt()}%"
+                                                    }
+                                                }
+                                            }
+                                            file.delete()
+                                            calibProgress = null
+                                            val r = result.getOrNull()
+                                            if (r == null) {
+                                                result.exceptionOrNull()?.printStackTrace()
+                                                Toast.makeText(context, "Calibration failed: checkerboard not found", Toast.LENGTH_LONG).show()
+                                                return@launch
+                                            }
+                                            // storico accanto al video + calibration.json nella cartella principale,
+                                            // dove lo stitcher lo trova per tutte le Scansione_NN
+                                            exportText(context, videoName.replace(".mp4", ".calibration.json"), CALIBRATION_FOLDER, r.json)
+                                            exportText(context, "calibration.json", "", r.json)
+                                            Toast.makeText(
+                                                context,
+                                                String.format(Locale.US, "Calibration saved: RMS %.2f px, %d frames (%dx%d)", r.rms, r.used, r.width, r.height),
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                    } else {
+                                        file.delete()   // Clean up temporary file
+                                    }
                                 }
                                 if (isCalib) calibMode = false   // dopo il salvataggio si torna alla scansione
                                 showSummaryModal = false
@@ -1021,14 +1089,6 @@ fun MetricCard(modifier: Modifier = Modifier, label: String, value: String, bord
     Column(modifier = modifier.clip(RoundedCornerShape(10.dp)).background(Color(0xC80F172A)).border(1.5.dp, borderColor, RoundedCornerShape(10.dp)).padding(horizontal = 8.dp, vertical = 6.dp)) {
         Text(text = label, color = Color(0xFF94A3B8), fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         Text(text = value, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-    }
-}
-
-@Composable
-fun SimSliderRow(label: String, value: Float, range: ClosedFloatingPointRange<Float>, onValueChange: (Float) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Text(text = label, color = Color.White, fontSize = 11.sp, modifier = Modifier.weight(0.35f))
-        Slider(value = value, onValueChange = onValueChange, valueRange = range, modifier = Modifier.weight(0.65f))
     }
 }
 
@@ -1094,6 +1154,30 @@ fun exportVideo(context: Context, file: File, name: String, folder: String) {
     }
 }
 
+/** Scrive un file di testo in Download/WoodScanPro/<folder> ("" = cartella principale), sostituendo quello esistente. */
+fun exportText(context: Context, name: String, folder: String, text: String) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val path = relativePath(folder).trimEnd('/') + "/"
+        // su Android 10+ si possono cancellare solo i file creati dall'app: basta per sostituire i propri
+        runCatching {
+            context.contentResolver.delete(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
+                arrayOf(name, path)
+            )
+        }
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, name)
+            put(MediaStore.Downloads.MIME_TYPE, "application/json")
+            put(MediaStore.Downloads.RELATIVE_PATH, path)
+        }
+        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
+        context.contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
+    } else {
+        File(legacyDir(folder), name).writeText(text)
+    }
+}
+
 /** Salva un file del logger in Download/WoodScanPro/<folder>. */
 fun exportFile(context: Context, file: File, folder: String) {
     val mime = if (file.extension == "csv") "text/csv" else "application/json"
@@ -1120,6 +1204,10 @@ const val ROOT_DIR = "WoodScanPro"
 const val CALIBRATION_FOLDER = "calibrazione"
 private const val SCAN_PREFIX = "Scansione_"
 private const val VIDEO_TAG = "WoodScanVideo"
+
+// Posizione delle linee guida della catasta, in frazione dell'altezza dello schermo
+private const val GUIDE_TOP_FRAC = 0.18f
+private const val GUIDE_BOTTOM_FRAC = 0.82f
 
 /** Percorso relativo per MediaStore (Android 10+). */
 private fun relativePath(folder: String) = "${Environment.DIRECTORY_DOWNLOADS}/$ROOT_DIR/$folder"

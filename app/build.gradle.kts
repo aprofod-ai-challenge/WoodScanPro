@@ -60,4 +60,7 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.camera:camera-video:$cameraxVersion")
     implementation("androidx.camera:camera-view:$cameraxVersion")
+
+    // OpenCV: calibrazione della camera sul telefono (calibration.json per lo stitcher)
+    implementation("org.opencv:opencv:4.13.0")
 }

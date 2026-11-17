@@ -30,6 +30,8 @@ import java.io.File
  *  <base>_imu.csv     timestamp_ns,x,y,z,w   orientamento (game rotation vector, ~100 Hz), solo se il sensore esiste
  *  <base>_frames.csv  sensor_timestamp_ns    istante di ogni frame della camera
  *  <base>_meta.json   camera, sensore IMU, rotazione schermo, orologi all'avvio del video, formato del video
+ *  <base>.orientation.json  orientamento camera->mondo per frame, nel formato dello stitcher
+ *                           (solo se richiesto in start(), c'è il sensore e il video è verticale)
  *
  * Sensori e camera sono sullo stesso orologio solo se timestamp_source = "realtime".
  * start/stop/onVideoStart vanno chiamati dal thread principale.
@@ -43,8 +45,9 @@ class CaptureLogger(private val context: Context) {
     private var frameWriter: BufferedWriter? = null
     private var cameraInfo = JSONObject()
     private var meta = JSONObject()
+    private var orientationFile: File? = null
 
-    /** File dell'ultima registrazione, nell'ordine: imu (se c'è il sensore), frames, meta. */
+    /** File dell'ultima registrazione: imu (se c'è il sensore), frames, meta, orientation (se creato). */
     var files: List<File> = emptyList(); private set
 
     private val sensorListener = object : SensorEventListener {
@@ -89,8 +92,9 @@ class CaptureLogger(private val context: Context) {
      * Avvia la registrazione in [dir], subito prima del video.
      * Restituisce false se manca il sensore di orientamento (frame e meta vengono salvati comunque).
      */
-    fun start(dir: File, baseName: String): Boolean {
+    fun start(dir: File, baseName: String, exportOrientation: Boolean = true): Boolean {
         val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+        orientationFile = File(dir, "$baseName.orientation.json").takeIf { exportOrientation && sensor != null }
         val imu = File(dir, "${baseName}_imu.csv")
         val frames = File(dir, "${baseName}_frames.csv")
         files = listOfNotNull(imu.takeIf { sensor != null }, frames, File(dir, "${baseName}_meta.json"))
@@ -134,13 +138,30 @@ class CaptureLogger(private val context: Context) {
         if (!wasRunning) return
 
         video?.let { meta.put("video", describeVideo(it)) }
-        files.last().writeText(meta.toString(2))
+        val metaFile = files.last()
+        metaFile.writeText(meta.toString(2))
+        writeOrientation(metaFile)?.let { files = files + it }
     }
 
     fun deleteFiles() {
         stop(null)
         files.forEach { it.delete() }
         files = emptyList()
+    }
+
+    /** Converte imu + frames nel JSON dello stitcher (vedi OrientationExport). */
+    private fun writeOrientation(metaFile: File): File? {
+        val out = orientationFile ?: return null
+        val startNs = meta.optJSONObject("clocks_at_video_start")?.optLong("elapsed_realtime_ns", -1L) ?: -1L
+        if (startNs < 0) return null
+        val dir = metaFile.parentFile ?: return null
+        val base = metaFile.name.removeSuffix("_meta.json")
+        return runCatching {
+            OrientationExport.write(
+                File(dir, "${base}_imu.csv"), File(dir, "${base}_frames.csv"),
+                startNs, meta.optInt("screen_rotation_deg", 0), out
+            )
+        }.onFailure { it.printStackTrace() }.getOrNull()
     }
 
     @Suppress("DEPRECATION")

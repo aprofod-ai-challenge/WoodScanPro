@@ -11,6 +11,7 @@ import kotlin.math.roundToInt
 object CalibConfig {
     const val PATTERN_COLS = 9            // angoli interni della scacchiera 10x7
     const val PATTERN_ROWS = 6
+    const val SQUARE_MM = 25.0            // lato di un quadrato della scacchiera stampata (per calibration.json)
     const val GRID_SHORT = 4              // celle di copertura sul lato corto dell'immagine
     const val GRID_LONG = 6               // celle sul lato lungo
     const val HITS_PER_CELL = 6           // angoli rilevati perché una cella conti come coperta
@@ -136,10 +137,9 @@ private fun progressLine(p: Float?): String = when {
  * 2. viste di sbieco: guardare la scacchiera da sinistra, destra, sopra e sotto (~25-30°);
  * 3. distanze: una vista da vicino e una da lontano.
  */
-fun computeCalibHint(s: CalibStatus, isRecording: Boolean, aeAfLocked: Boolean, rotSpeedDps: Double): CalibHint {
+fun computeCalibHint(s: CalibStatus, isRecording: Boolean, rotSpeedDps: Double): CalibHint {
     if (!isRecording) return when {
         !s.detected -> CalibHint("Inquadra tutta la scacchiera", HintLevel.WARN)
-        !aeAfLocked -> CalibHint("Scacchiera rilevata: blocca AE/AF, poi premi Rec", HintLevel.WARN)
         else -> CalibHint("Pronto: premi Rec. Tre fasi: copertura, viste di sbieco, distanze", HintLevel.OK)
     }
     if (rotSpeedDps > CalibConfig.MAX_ROT_SPEED_DPS)
