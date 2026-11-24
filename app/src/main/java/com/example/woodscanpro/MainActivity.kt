@@ -1,7 +1,6 @@
 package com.example.woodscanpro
 
 import android.Manifest
-import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.Sensor
@@ -9,12 +8,8 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.camera2.CaptureRequest
-import android.media.MediaScannerConnection
-import android.os.Build
 import android.os.Bundle
 import android.util.Log
-import android.os.Environment
-import android.provider.MediaStore
 import android.widget.MediaController
 import android.widget.Toast
 import android.widget.VideoView
@@ -60,6 +55,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -108,8 +104,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.rememberCoroutineScope
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -187,19 +181,6 @@ fun WoodScanApp() {
         }
     }
 
-    // Android 9 e precedenti: permesso per scrivere in Movies/ e Download/ (richiesto dopo quello della camera)
-    val storagePermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { }
-    LaunchedEffect(hasCameraPermission) {
-        if (hasCameraPermission && Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        }
-    }
-
     var roll by remember { mutableDoubleStateOf(0.0) }
     var pitch by remember { mutableDoubleStateOf(0.0) }
     var rotSpeed by remember { mutableDoubleStateOf(0.0) }
@@ -224,6 +205,11 @@ fun WoodScanApp() {
     // NEW: Temporary File Tracking
     var tempVideoFile by remember { mutableStateOf<File?>(null) }
     var currentVideoName by remember { mutableStateOf("") }
+    val repo = remember { ScanRepository.get(context) }
+    var showCodeDialog by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    var saveError by remember { mutableStateOf<String?>(null) }
+    var showScanList by remember { mutableStateOf(false) }
     val logger = remember { CaptureLogger(context) }
 
     // Guida alla calibrazione: rileva la scacchiera nei frame di analisi e misura la copertura
@@ -458,6 +444,74 @@ fun WoodScanApp() {
                         }
                     }
                 }
+        }
+    }
+
+    /** Salva la scansione con il codice scelto e, se c'è connessione, la carica subito. */
+    fun saveScan(code: String) {
+        val video = tempVideoFile ?: return
+        if (saving) return
+        val orientation = logger.files.firstOrNull { it.name.endsWith(".orientation.json") }
+        saving = true
+        saveError = null
+        repo.scope.launch {
+            try {
+                repo.save(code, video, orientation)
+            } catch (e: Exception) {
+                // il video temporaneo resta: si può riprovare
+                Log.e(VIDEO_TAG, "Salvataggio non riuscito", e)
+                saveError = if (e is IllegalArgumentException) e.message else "Salvataggio non riuscito: ${e.message}"
+                return@launch
+            } finally {
+                saving = false
+            }
+            video.delete()
+            logger.deleteFiles()
+            tempVideoFile = null
+            showCodeDialog = false
+            showSummaryModal = false
+            Toast.makeText(context, "Scansione $code salvata", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, uploadMessage(repo.upload(code), code), Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Calcola calibration.json dal video della scacchiera; si conserva solo il risultato. */
+    fun saveCalibration() {
+        val file = tempVideoFile ?: return
+        logger.deleteFiles()
+        tempVideoFile = null
+        calibMode = false   // dopo il salvataggio si torna alla scansione
+        showSummaryModal = false
+        scope.launch {
+            calibProgress = "Calibrazione in corso… 0%"
+            val result = withContext(Dispatchers.Default) {
+                runCatching {
+                    CalibrationExport.compute(file) { p ->
+                        calibProgress = "Calibrazione in corso… ${(p * 100).roundToInt()}%"
+                    }
+                }
+            }
+            file.delete()
+            calibProgress = null
+            val r = result.getOrNull()
+            if (r == null) {
+                result.exceptionOrNull()?.printStackTrace()
+                Toast.makeText(context, "Calibrazione non riuscita: scacchiera non trovata", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            repo.scope.launch {
+                try {
+                    repo.saveCalibration(r.json)
+                    Toast.makeText(
+                        context,
+                        String.format(Locale.US, "Calibrazione salvata: RMS %.2f px, %d fotogrammi (%dx%d)", r.rms, r.used, r.width, r.height),
+                        Toast.LENGTH_LONG
+                    ).show()
+                } catch (e: Exception) {
+                    Log.e(VIDEO_TAG, "Scrittura di calibration.json non riuscita", e)
+                    Toast.makeText(context, "Impossibile salvare la calibrazione: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 
@@ -792,25 +846,42 @@ fun WoodScanApp() {
                     }
 
                     Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
-                        // Pulsante modalità calibrazione: bloccato durante la registrazione e finché
-                        // il video precedente non è stato salvato o scartato
-                        Button(
-                            onClick = {
-                                calibMode = !calibMode
-                                if (calibMode) {
-                                    calibGuide.reset()
-                                    if (isAeAfLocked) toggleAeAfLock()   // in calibrazione AE/AF resta automatico
-                                }
-                            },
-                            enabled = !isRecording && tempVideoFile == null,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (calibMode) colorCalib else Color.White.copy(alpha = 0.15f)
-                            )
-                        ) {
-                            Text(
-                                text = "Calibrazione",   // attiva = sfondo colorato
-                                color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold
-                            )
+                        Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            val pending = repo.pendingCount
+                            Button(
+                                onClick = { showScanList = true },
+                                enabled = !isRecording && tempVideoFile == null,
+                                colors = ButtonDefaults.buttonColors(containerColor = Color.White.copy(alpha = 0.15f)),
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                modifier = Modifier.height(36.dp)
+                            ) {
+                                Text(
+                                    text = if (pending > 0) "Scansioni ($pending)" else "Scansioni",
+                                    color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1
+                                )
+                            }
+                            // Pulsante modalità calibrazione: bloccato durante la registrazione e finché
+                            // il video precedente non è stato salvato o scartato
+                            Button(
+                                onClick = {
+                                    calibMode = !calibMode
+                                    if (calibMode) {
+                                        calibGuide.reset()
+                                        if (isAeAfLocked) toggleAeAfLock()   // in calibrazione AE/AF resta automatico
+                                    }
+                                },
+                                enabled = !isRecording && tempVideoFile == null,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (calibMode) colorCalib else Color.White.copy(alpha = 0.15f)
+                                ),
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                modifier = Modifier.height(36.dp)
+                            ) {
+                                Text(
+                                    text = "Calibrazione",   // attiva = sfondo colorato
+                                    color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
@@ -820,7 +891,7 @@ fun WoodScanApp() {
         // Overlay di calibrazione: griglia di copertura allineata al fotogramma registrato
         // (la preview è in FIT_CENTER), cella obiettivo in giallo, scacchiera rilevata in ciano.
         // È disegnato sopra l'interfaccia perché barra di stato e controlli coprono i bordi dell'immagine.
-        if (calibMode && !showSummaryModal) {
+        if (calibMode && !showSummaryModal && !showScanList) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val s = calibStatus
                 val aspect = s.frameAspect
@@ -1004,59 +1075,8 @@ fun WoodScanApp() {
                         // SAVE BUTTON
                         Button(
                             onClick = {
-                                tempVideoFile?.let { file ->
-                                    // Download/WoodScanPro/calibrazione oppure Download/WoodScanPro/Scansione_NN
-                                    val folder = if (isCalib) CALIBRATION_FOLDER else nextScanFolder(context)
-                                    exportVideo(context, file, currentVideoName, folder)
-                                    Toast.makeText(context, "Salvato in $ROOT_DIR/$folder", Toast.LENGTH_SHORT).show()
-
-                                    // Export JSON matching the video name (solo per le scansioni:
-                                    // la telemetria di qualità non serve per la calibrazione)
-                                    if (!isCalib) {
-                                        val jsonName = currentVideoName.replace(".mp4", ".json")
-                                        exportTelemetryJson(context, telemetryLog, jsonName, folder)
-                                    }
-
-                                    logger.files.forEach { exportFile(context, it, folder) }
-                                    logger.deleteFiles()
-                                    tempVideoFile = null
-                                    if (isCalib) {
-                                        // calibration.json calcolato sul telefono; il video temporaneo
-                                        // si cancella solo a calcolo finito
-                                        val videoName = currentVideoName
-                                        scope.launch {
-                                            calibProgress = "Calibrazione in corso… 0%"
-                                            val result = withContext(Dispatchers.Default) {
-                                                runCatching {
-                                                    CalibrationExport.compute(file) { p ->
-                                                        calibProgress = "Calibrazione in corso… ${(p * 100).roundToInt()}%"
-                                                    }
-                                                }
-                                            }
-                                            file.delete()
-                                            calibProgress = null
-                                            val r = result.getOrNull()
-                                            if (r == null) {
-                                                result.exceptionOrNull()?.printStackTrace()
-                                                Toast.makeText(context, "Calibrazione non riuscita: scacchiera non trovata", Toast.LENGTH_LONG).show()
-                                                return@launch
-                                            }
-                                            // storico accanto al video + calibration.json nella cartella principale,
-                                            // dove lo stitcher lo trova per tutte le Scansione_NN
-                                            exportText(context, videoName.replace(".mp4", ".calibration.json"), CALIBRATION_FOLDER, r.json)
-                                            exportText(context, "calibration.json", "", r.json)
-                                            Toast.makeText(
-                                                context,
-                                                String.format(Locale.US, "Calibrazione salvata: RMS %.2f px, %d fotogrammi (%dx%d)", r.rms, r.used, r.width, r.height),
-                                                Toast.LENGTH_LONG
-                                            ).show()
-                                        }
-                                    } else {
-                                        file.delete()   // Clean up temporary file
-                                    }
-                                }
-                                if (isCalib) calibMode = false   // dopo il salvataggio si torna alla scansione
-                                showSummaryModal = false
+                                if (isCalib) saveCalibration()
+                                else { saveError = null; showCodeDialog = true }
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = colorOk),
                             modifier = Modifier.weight(1f)
@@ -1081,6 +1101,19 @@ fun WoodScanApp() {
                 }
             }
         }
+
+        if (showCodeDialog) {
+            ScanCodeDialog(
+                usedCodes = repo.usedCodes,
+                calibrated = repo.calibrated,
+                saving = saving,
+                saveError = saveError,
+                onConfirm = { saveScan(it) },
+                onDismiss = { showCodeDialog = false }
+            )
+        }
+
+        if (showScanList) ScanListScreen(repo, onClose = { showScanList = false })
     }
 }
 
@@ -1092,162 +1125,8 @@ fun MetricCard(modifier: Modifier = Modifier, label: String, value: String, bord
     }
 }
 
-fun exportTelemetryJson(context: Context, samples: List<TelemetrySample>, fileName: String, folder: String) {
-    try {
-        val root = JSONObject()
-        root.put("capturedAt", SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).format(Date()))
-        val arr = JSONArray()
-        for (s in samples) {
-            val obj = JSONObject()
-            obj.put("t_ms", s.tMs)
-            obj.put("roll_deg", s.rollDeg)
-            obj.put("pitch_deg", s.pitchDeg)
-            obj.put("rot_speed_dps", s.rotSpeedDps)
-            obj.put("luma_mean", s.lumaMean)
-            obj.put("over_exposed_pct", s.overExposedPct)
-            obj.put("under_exposed_pct", s.underExposedPct)
-            obj.put("optical_flow", s.opticalFlow)
-            obj.put("sharpness", s.sharpness)
-            obj.put("quality_status", s.qualityStatus)
-            obj.put("frame_score", ScanScore.frameScore(s))
-            arr.put(obj)
-        }
-        root.put("samples", arr)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, fileName)
-                put(MediaStore.Downloads.MIME_TYPE, "application/json")
-                put(MediaStore.Downloads.RELATIVE_PATH, relativePath(folder))
-            }
-            val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            uri?.let {
-                context.contentResolver.openOutputStream(it)?.use { out ->
-                    out.write(root.toString(2).toByteArray())
-                }
-            }
-        } else {
-            File(legacyDir(folder), fileName).writeText(root.toString(2))
-        }
-    } catch (e: Exception) {
-        Toast.makeText(context, "Esportazione non riuscita: ${e.message}", Toast.LENGTH_SHORT).show()
-    }
-}
-
-/**
- * Salva il video in Download/WoodScanPro/<folder>, nella stessa cartella dei log (_imu.csv, _frames.csv, _meta.json),
- * così sul PC video e log restano insieme. (Movies/ su Android 10+ accetterebbe solo file video.)
- */
-fun exportVideo(context: Context, file: File, name: String, folder: String) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath(folder))
-        }
-        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
-        context.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
-    } else {
-        val dest = File(legacyDir(folder), name)
-        file.copyTo(dest, overwrite = true)
-        MediaScannerConnection.scanFile(context, arrayOf(dest.absolutePath), arrayOf("video/mp4"), null)
-    }
-}
-
-/** Scrive un file di testo in Download/WoodScanPro/<folder> ("" = cartella principale), sostituendo quello esistente. */
-fun exportText(context: Context, name: String, folder: String, text: String) {
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        val path = relativePath(folder).trimEnd('/') + "/"
-        // su Android 10+ si possono cancellare solo i file creati dall'app: basta per sostituire i propri
-        runCatching {
-            context.contentResolver.delete(
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} = ?",
-                arrayOf(name, path)
-            )
-        }
-        val values = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, name)
-            put(MediaStore.Downloads.MIME_TYPE, "application/json")
-            put(MediaStore.Downloads.RELATIVE_PATH, path)
-        }
-        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
-        context.contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) }
-    } else {
-        File(legacyDir(folder), name).writeText(text)
-    }
-}
-
-/** Salva un file del logger in Download/WoodScanPro/<folder>. */
-fun exportFile(context: Context, file: File, folder: String) {
-    val mime = if (file.extension == "csv") "text/csv" else "application/json"
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        val values = ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, file.name)
-            put(MediaStore.Downloads.MIME_TYPE, mime)
-            put(MediaStore.Downloads.RELATIVE_PATH, relativePath(folder))
-        }
-        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
-        context.contentResolver.openOutputStream(uri)?.use { out -> file.inputStream().use { it.copyTo(out) } }
-    } else {
-        file.copyTo(File(legacyDir(folder), file.name), overwrite = true)
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// Organizzazione delle cartelle:
-//   Download/WoodScanPro/calibrazione/   tutti i video di calibrazione con i loro log
-//   Download/WoodScanPro/Scansione_NN/   una cartella per ogni scansione salvata
-// ---------------------------------------------------------------------------------------------
-
-const val ROOT_DIR = "WoodScanPro"
-const val CALIBRATION_FOLDER = "calibrazione"
-private const val SCAN_PREFIX = "Scansione_"
 private const val VIDEO_TAG = "WoodScanVideo"
 
 // Posizione delle linee guida della catasta, in frazione dell'altezza dello schermo
 private const val GUIDE_TOP_FRAC = 0.18f
 private const val GUIDE_BOTTOM_FRAC = 0.82f
-
-/** Percorso relativo per MediaStore (Android 10+). */
-private fun relativePath(folder: String) = "${Environment.DIRECTORY_DOWNLOADS}/$ROOT_DIR/$folder"
-
-/** Cartella su disco per Android 9 e precedenti (creata se manca). */
-private fun legacyDir(folder: String) =
-    File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "$ROOT_DIR/$folder").apply { mkdirs() }
-
-/**
- * Nome della prossima cartella di scansione libera (Scansione_01, Scansione_02, ...).
- * Il numero è il massimo tra le cartelle già presenti e l'ultimo numero salvato nelle preferenze,
- * più uno: le preferenze coprono i casi in cui l'app non vede le cartelle esistenti (vedi nota sotto).
- * Nota: su Android 10+ l'app vede solo i file creati da lei; dopo una reinstallazione non vede più le
- * scansioni precedenti e, se anche le preferenze sono state cancellate, la numerazione riparte da 01.
- */
-fun nextScanFolder(context: Context): String {
-    val prefs = context.getSharedPreferences("woodscan", Context.MODE_PRIVATE)
-    var maxN = prefs.getInt("last_scan_number", 0)
-    val regex = Regex("$SCAN_PREFIX(\\d+)")
-
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        context.contentResolver.query(
-            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-            arrayOf(MediaStore.MediaColumns.RELATIVE_PATH),
-            "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
-            arrayOf("${relativePath(SCAN_PREFIX)}%"),
-            null
-        )?.use { cursor ->
-            while (cursor.moveToNext()) {
-                regex.find(cursor.getString(0) ?: "")?.let { maxN = maxOf(maxN, it.groupValues[1].toInt()) }
-            }
-        }
-    } else {
-        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), ROOT_DIR)
-            .listFiles()?.forEach { f ->
-                regex.matchEntire(f.name)?.let { maxN = maxOf(maxN, it.groupValues[1].toInt()) }
-            }
-    }
-
-    val next = maxN + 1
-    prefs.edit().putInt("last_scan_number", next).apply()
-    return String.format(Locale.US, "%s%02d", SCAN_PREFIX, next)
-}

@@ -9,6 +9,18 @@ Tags:
 
 ----------------------------------------------------------------------------------------------------
 
+# v1.0.4 (2026-11-24)
+
+- New    -- L'operatore inserisce il codice della scansione, che dà il nome al tar e ai file che contiene;
+- New    -- Ogni scansione è un <codice>.tar con video, orientamento e calibrazione (gli ultimi due se disponibili);
+- New    -- Coda di caricamento: subito se c'è connessione, altrimenti dalla schermata Scansioni (database simulato);
+- New    -- Codice già presente nel database: caricamento rifiutato e scansione rinominabile;
+- New    -- Schermata Scansioni: stato, caricamento ed eliminazione delle scansioni caricate;
+- Change -- File nella memoria dell'app invece che in Download, esclusi dal backup; permesso di scrittura rimosso;
+- Change -- Della calibrazione si conserva solo calibration.json;
+- Fix    -- La copia del video al salvataggio non blocca più l'interfaccia;
+----------------------------------------------------------------------------------------------------
+
 # v1.0.3 (2026-11-12)
 
 - New    -- Modalità calibrazione (pulsante 📐 Calibrazione) per registrare il video della scacchiera;
