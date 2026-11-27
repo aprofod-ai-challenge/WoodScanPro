@@ -148,6 +148,7 @@ data class TelemetrySample(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        UploadNetworkWatcher.install(this)
         setContent {
             MaterialTheme {
                 WoodScanApp()

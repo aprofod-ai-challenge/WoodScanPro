@@ -15,9 +15,9 @@ import java.util.Date
 import java.util.Locale
 
 private const val R2_URL = "https://woodscan-r2.nima00.workers.dev"
-private const val R2_TOKEN = "..."
+private const val R2_TOKEN = "dcd36cbaa97f0944a3d22b32951d169aba2378e13434203500bc511ee052edf1"
 private const val SQL_URL = "https://woodscan-sql.nima00.workers.dev"
-private const val SQL_TOKEN = "..."
+private const val SQL_TOKEN = "16b101942dd7bb3cc7fe7567b473a15c7d5450c4be31b0666b38692e9a45a0e5"
 
 /** Nel database c'è già una scansione diversa con questo codice. */
 class CodeTakenException(code: String) : IOException("Codice $code già presente nel database")
