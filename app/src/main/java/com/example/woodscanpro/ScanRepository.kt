@@ -280,7 +280,6 @@ class ScanRepository private constructor(private val context: Context, private v
 
         fun get(context: Context): ScanRepository = instance ?: synchronized(this) {
             instance ?: context.applicationContext.let { app ->
-                // Qui si sostituirà il database vero
                 ScanRepository(app, CloudflareScanDatabase()).also { instance = it }
             }
         }
